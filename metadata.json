@@ -1,0 +1,6 @@
+{
+  "name": "DevIllustrate AI – Technical Documentation Graphic Generator",
+  "description": "Convert natural-language technical descriptions into professional technical illustrations with prompt enhancement, four visual styles, interactive smart labeling, outputs management, and a complete Python/Colab/Streamlit project kit.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
