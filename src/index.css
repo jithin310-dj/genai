@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
   --font-display: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
@@ -11,6 +12,11 @@
     font-family: var(--font-sans);
     color: #0f172a;
     background-color: #f8fafc;
+  }
+
+  html.dark {
+    color: #f1f5f9;
+    background-color: #0b1120;
   }
 
   h1,
@@ -35,7 +41,19 @@
   background-size: 24px 24px;
 }
 
+.dark .studio-grid-bg {
+  background-color: #0f172a;
+  background-image:
+    linear-gradient(to right, rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
 /* Custom sleek range input for generation sliders */
 input[type="range"] {
   accent-color: #1d4ed8;
+}
+
+.dark input[type="range"] {
+  accent-color: #3b82f6;
 }

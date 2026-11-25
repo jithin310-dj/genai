@@ -1,11 +1,41 @@
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  extractErrorStatus,
+  isNetworkOrTimeoutError,
+  ProviderError,
+  redactSecrets,
+  retryWithBackoff,
+  withTimeout,
+} from './providerUtils.ts';
+
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
+export const DEFAULT_GEMINI_FALLBACK_MODEL = 'gemini-4-hydrogen';
+const GEMINI_TIMEOUT_MS = 60_000;
+
+export function getGeminiPrimaryModel(): string {
+  return process.env.GEMINI_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
+}
+
+export function getGeminiFallbackModel(): string {
+  return process.env.GEMINI_FALLBACK_MODEL?.trim() || DEFAULT_GEMINI_FALLBACK_MODEL;
+}
+
+export function isGeminiConfigured(): boolean {
+  const key = process.env.GEMINI_API_KEY?.trim();
+  return Boolean(key && key !== 'MY_GEMINI_API_KEY');
+}
 
 function getClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      'GEMINI_API_KEY is not configured. Please check your environment secrets in Settings > Secrets.'
-    );
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    throw new ProviderError(503, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'MISSING_TOKEN',
+      userMessage:
+        'Gemini API key is not configured on the server. Add GEMINI_API_KEY in Settings > Secrets or switch engine.',
+      retryable: false,
+    });
   }
   return new GoogleGenAI({
     apiKey,
@@ -17,9 +47,255 @@ function getClient(): GoogleGenAI {
   });
 }
 
+export function normalizeGeminiError(error: unknown): ProviderError {
+  if (error instanceof ProviderError) {
+    return error;
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  const status = extractErrorStatus(error);
+  const rawMessage = redactSecrets(
+    error instanceof Error ? error.message : String(error ?? 'Unknown Gemini error'),
+    [apiKey]
+  );
+  const lower = rawMessage.toLowerCase();
+
+  // Log full raw error strictly on the server (stdout so handled upstream errors don't trigger unhandled stderr alerts)
+  console.info('[Gemini upstream]', { status, message: rawMessage });
+
+  if (isNetworkOrTimeoutError(error)) {
+    return new ProviderError(504, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'TIMEOUT',
+      userMessage:
+        'Gemini timed out or lost connection while generating. Please retry or switch engine.',
+      retryable: true,
+      retryAfterSeconds: 3,
+    });
+  }
+
+  if (
+    status === 401 ||
+    status === 403 ||
+    lower.includes('api_key_invalid') ||
+    lower.includes('api key not valid') ||
+    lower.includes('permission_denied')
+  ) {
+    return new ProviderError(status === 403 ? 403 : 401, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'INVALID_TOKEN',
+      userMessage:
+        'Gemini API key is invalid or lacks permission. Check GEMINI_API_KEY in Settings > Secrets.',
+      retryable: false,
+    });
+  }
+
+  if (status === 400 || lower.includes('invalid_argument')) {
+    return new ProviderError(400, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'INVALID_REQUEST',
+      userMessage:
+        'Gemini could not process this prompt or request parameters. Try shortening or simplifying the prompt.',
+      retryable: false,
+    });
+  }
+
+  if (status === 404 || lower.includes('not_found')) {
+    return new ProviderError(502, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'MODEL_NOT_FOUND',
+      userMessage:
+        'The configured Gemini model ID was not found. Check GEMINI_MODEL in your server environment.',
+      retryable: false,
+    });
+  }
+
+  if (
+    status === 429 ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('quota') ||
+    lower.includes('rate limit')
+  ) {
+    return new ProviderError(429, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'QUOTA_EXCEEDED',
+      userMessage:
+        'Gemini rate limit or quota reached. Wait a moment or switch to Hugging Face.',
+      retryable: true,
+      retryAfterSeconds: 10,
+    });
+  }
+
+  if (
+    status === 503 ||
+    status === 502 ||
+    status === 504 ||
+    lower.includes('unavailable') ||
+    lower.includes('high demand') ||
+    lower.includes('overloaded')
+  ) {
+    return new ProviderError(503, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'MODEL_UNAVAILABLE',
+      userMessage:
+        'Gemini is busy right now due to high demand. Please retry in a few seconds or switch engine.',
+      retryable: true,
+      retryAfterSeconds: 5,
+    });
+  }
+
+  return new ProviderError(502, {
+    provider: 'gemini',
+    providerLabel: 'Gemini',
+    code: 'UPSTREAM_ERROR',
+    userMessage:
+      'Gemini encountered an unexpected error while generating. Please retry or switch engine.',
+    retryable: status >= 500 || status === 0,
+  });
+}
+
+function shouldFallbackToSecondaryModel(err: ProviderError): boolean {
+  return (
+    err.statusCode === 503 ||
+    err.statusCode === 429 ||
+    err.statusCode === 504 ||
+    err.payload.code === 'MODEL_UNAVAILABLE' ||
+    err.payload.code === 'QUOTA_EXCEEDED' ||
+    err.payload.code === 'MODEL_NOT_FOUND' ||
+    err.payload.code === 'TIMEOUT'
+  );
+}
+
+function buildThinkingConfig(model: string, preferred: 'low' | 'medium') {
+  if (model.startsWith('gemini-3.1-flash-lite')) {
+    return {
+      thinkingConfig: {
+        thinkingLevel: ThinkingLevel.MINIMAL,
+      },
+    };
+  }
+  if (model.startsWith('gemini-4')) {
+    return {
+      thinkingConfig: {
+        thinkingLevel: preferred === 'medium' ? ThinkingLevel.LOW : ThinkingLevel.LOW,
+      },
+    };
+  }
+  if (model.startsWith('gemini-3')) {
+    return {
+      thinkingConfig: {
+        thinkingLevel: ThinkingLevel.LOW,
+      },
+    };
+  }
+  return {};
+}
+
+export interface GeminiExecutionOptions {
+  maxAttempts?: number;
+  baseDelayMs?: number;
+  timeoutMs?: number;
+  invokeModel?: (model: string, signal: AbortSignal) => Promise<string | undefined>;
+}
+
+/**
+ * Executes a Gemini generation call with:
+ * - 60s request timeout
+ * - Max 3 attempts with exponential backoff + jitter on transient errors (503, 429, timeout)
+ * - Automatic single fallback attempt on GEMINI_FALLBACK_MODEL if primary fails with 503/429
+ */
+export async function executeGeminiWithResilience(
+  runner: (model: string, signal: AbortSignal) => Promise<string | undefined>,
+  options: GeminiExecutionOptions = {}
+): Promise<{ text: string; modelUsed: string; usedFallbackModel: boolean }> {
+  const primaryModel = getGeminiPrimaryModel();
+  const fallbackModel = getGeminiFallbackModel();
+  const maxAttempts = options.maxAttempts ?? 3;
+  const timeoutMs = options.timeoutMs ?? GEMINI_TIMEOUT_MS;
+  const actualRunner = options.invokeModel ?? runner;
+
+  const callSingleModel = async (model: string): Promise<string> => {
+    try {
+      const text = await withTimeout(
+        (signal) => actualRunner(model, signal),
+        timeoutMs,
+        'gemini'
+      );
+      const trimmed = text?.trim();
+      if (!trimmed) {
+        throw new ProviderError(502, {
+          provider: 'gemini',
+          providerLabel: 'Gemini',
+          code: 'EMPTY_RESPONSE',
+          userMessage: 'Gemini returned an empty response. Please try again.',
+          retryable: true,
+        });
+      }
+      return trimmed;
+    } catch (err) {
+      throw normalizeGeminiError(err);
+    }
+  };
+
+  try {
+    const text = await retryWithBackoff(() => callSingleModel(primaryModel), {
+      maxAttempts,
+      baseDelayMs: options.baseDelayMs ?? 1000,
+      shouldRetry: (err) => err instanceof ProviderError && err.payload.retryable,
+      onRetry: (attempt, total, delayMs, err) => {
+        const code = err instanceof ProviderError ? err.payload.code : 'TRANSIENT';
+        console.info(
+          `[Gemini] ${primaryModel} attempt ${attempt}/${total} failed (${code}); retrying in ${delayMs}ms`
+        );
+      },
+    });
+    markGeminiHealthy();
+    return { text, modelUsed: primaryModel, usedFallbackModel: false };
+  } catch (primaryErr) {
+    const normalized = normalizeGeminiError(primaryErr);
+    if (
+      fallbackModel &&
+      fallbackModel !== primaryModel &&
+      shouldFallbackToSecondaryModel(normalized)
+    ) {
+      console.info(
+        `[Gemini] Primary model ${primaryModel} failed (${normalized.payload.code}); retrying once on fallback model ${fallbackModel}`
+      );
+      try {
+        const fallbackText = await callSingleModel(fallbackModel);
+        markGeminiHealthy();
+        return { text: fallbackText, modelUsed: fallbackModel, usedFallbackModel: true };
+      } catch (fallbackErr) {
+        const normalizedFallback = normalizeGeminiError(fallbackErr);
+        if (
+          normalizedFallback.payload.code === 'MODEL_UNAVAILABLE' ||
+          normalizedFallback.payload.code === 'QUOTA_EXCEEDED'
+        ) {
+          markGeminiDegraded();
+        }
+        throw normalizedFallback;
+      }
+    }
+    if (
+      normalized.payload.code === 'MODEL_UNAVAILABLE' ||
+      normalized.payload.code === 'QUOTA_EXCEEDED'
+    ) {
+      markGeminiDegraded();
+    }
+    throw normalized;
+  }
+}
+
 export interface EnhancePromptRequest {
   prompt: string;
   style: string;
+  maxAttempts?: number;
 }
 
 export interface SuggestedComponent {
@@ -34,6 +310,7 @@ export interface EnhancePromptResponse {
   negativePrompt: string;
   suggestedTitle: string;
   suggestedComponents: SuggestedComponent[];
+  modelUsed?: string;
 }
 
 export async function enhanceTechnicalPrompt(
@@ -48,52 +325,63 @@ Given a user's natural-language technical concept and a visual style (Profession
 3. "suggestedTitle": A crisp 3-to-6 word documentation diagram title.
 4. "suggestedComponents": Exactly 4 or 5 key architectural components that belong in this diagram, each with "name" (2-4 words), "description" (1 clear sentence), and normalized approximate layout coordinates "x" and "y" strictly between 0.12 and 0.88 arranged cleanly from left-to-right or top-to-bottom.`;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
-    contents: `User concept: "${req.prompt}"\nSelected visual style: "${req.style}"`,
-    config: {
-      systemInstruction,
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          enhancedPrompt: { type: Type.STRING },
-          negativePrompt: { type: Type.STRING },
-          suggestedTitle: { type: Type.STRING },
-          suggestedComponents: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING },
-                description: { type: Type.STRING },
-                x: { type: Type.NUMBER },
-                y: { type: Type.NUMBER },
+  const { text, modelUsed } = await executeGeminiWithResilience(
+    async (model) => {
+      const response = await ai.models.generateContent({
+        model,
+        contents: `User concept: "${req.prompt}"\nSelected visual style: "${req.style}"`,
+        config: {
+          systemInstruction,
+          ...buildThinkingConfig(model, 'low'),
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              enhancedPrompt: { type: Type.STRING },
+              negativePrompt: { type: Type.STRING },
+              suggestedTitle: { type: Type.STRING },
+              suggestedComponents: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    x: { type: Type.NUMBER },
+                    y: { type: Type.NUMBER },
+                  },
+                  required: ['name', 'description', 'x', 'y'],
+                },
               },
-              required: ['name', 'description', 'x', 'y'],
             },
+            required: ['enhancedPrompt', 'negativePrompt', 'suggestedTitle', 'suggestedComponents'],
           },
         },
-        required: ['enhancedPrompt', 'negativePrompt', 'suggestedTitle', 'suggestedComponents'],
-      },
+      });
+      return response.text;
     },
-  });
+    { maxAttempts: req.maxAttempts }
+  );
 
-  const rawText = response.text?.trim();
-  if (!rawText) {
-    throw new Error('Model returned an empty response while enhancing the prompt.');
+  try {
+    const parsed = JSON.parse(text) as EnhancePromptResponse;
+    parsed.suggestedComponents = (parsed.suggestedComponents ?? []).map((comp) => ({
+      name: comp.name,
+      description: comp.description,
+      x: Number(Math.min(0.92, Math.max(0.08, comp.x)).toFixed(2)),
+      y: Number(Math.min(0.9, Math.max(0.1, comp.y)).toFixed(2)),
+    }));
+    parsed.modelUsed = modelUsed;
+    return parsed;
+  } catch {
+    throw new ProviderError(502, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'PARSE_ERROR',
+      userMessage: 'Gemini returned an unreadable prompt response. Please try again.',
+      retryable: true,
+    });
   }
-
-  const parsed = JSON.parse(rawText) as EnhancePromptResponse;
-  parsed.suggestedComponents = (parsed.suggestedComponents ?? []).map((comp) => ({
-    name: comp.name,
-    description: comp.description,
-    x: Number(Math.min(0.92, Math.max(0.08, comp.x)).toFixed(2)),
-    y: Number(Math.min(0.9, Math.max(0.1, comp.y)).toFixed(2)),
-  }));
-
-  return parsed;
 }
 
 export interface GenerateDiagramRequest {
@@ -105,12 +393,15 @@ export interface GenerateDiagramRequest {
   steps: number;
   guidanceScale: number;
   seed: number;
+  maxAttempts?: number;
 }
 
 export interface GenerateDiagramResponse {
   svg: string;
   title: string;
   components: SuggestedComponent[];
+  modelUsed?: string;
+  usedFallbackModel?: boolean;
 }
 
 export async function generateTechnicalDiagramSvg(
@@ -150,46 +441,65 @@ CRITICAL SVG RULES:
 7. Never use external href/images, scripts, or CSS classes that require external stylesheets. All fills, strokes, patterns, markers, and gradients must be self-contained inside <defs> and inline SVG attributes.
 8. For "components", return the exact 4 to 6 main visual components you drew in the SVG, with their accurate normalized center coordinates "x" (centerX / 1200) and "y" (centerY / 900) strictly between 0.08 and 0.92, so that numbered smart-label markers can be positioned accurately on each visual block.`;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
-    contents: `Technical description: ${req.prompt}\nEnhanced prompt context: ${req.enhancedPrompt}\nVisual style: ${req.style}\nTarget aspect canvas: 1200x900 (will rasterize to ${req.width}x${req.height})\nGuidance scale: ${req.guidanceScale} | Steps: ${req.steps} | Seed: ${req.seed}`,
-    config: {
-      systemInstruction,
-      seed: Number.isFinite(req.seed) ? Math.floor(req.seed) : 42,
-      thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          svg: { type: Type.STRING },
-          title: { type: Type.STRING },
-          components: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING },
-                description: { type: Type.STRING },
-                x: { type: Type.NUMBER },
-                y: { type: Type.NUMBER },
+  const { text, modelUsed, usedFallbackModel } = await executeGeminiWithResilience(
+    async (model) => {
+      const response = await ai.models.generateContent({
+        model,
+        contents: `Technical description: ${req.prompt}\nEnhanced prompt context: ${req.enhancedPrompt}\nVisual style: ${req.style}\nTarget aspect canvas: 1200x900 (will rasterize to ${req.width}x${req.height})\nGuidance scale: ${req.guidanceScale} | Steps: ${req.steps} | Seed: ${req.seed}`,
+        config: {
+          systemInstruction,
+          seed: Number.isFinite(req.seed) ? Math.floor(req.seed) : 42,
+          ...buildThinkingConfig(model, 'medium'),
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              svg: { type: Type.STRING },
+              title: { type: Type.STRING },
+              components: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    x: { type: Type.NUMBER },
+                    y: { type: Type.NUMBER },
+                  },
+                  required: ['name', 'description', 'x', 'y'],
+                },
               },
-              required: ['name', 'description', 'x', 'y'],
             },
+            required: ['svg', 'title', 'components'],
           },
         },
-        required: ['svg', 'title', 'components'],
-      },
+      });
+      return response.text;
     },
-  });
+    { maxAttempts: req.maxAttempts }
+  );
 
-  const rawText = response.text?.trim();
-  if (!rawText) {
-    throw new Error('Model returned an empty response while generating the technical illustration.');
+  let parsed: GenerateDiagramResponse;
+  try {
+    parsed = JSON.parse(text) as GenerateDiagramResponse;
+  } catch {
+    throw new ProviderError(502, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'PARSE_ERROR',
+      userMessage: 'Gemini returned an unreadable diagram payload. Please try again.',
+      retryable: true,
+    });
   }
 
-  const parsed = JSON.parse(rawText) as GenerateDiagramResponse;
   if (!parsed.svg || !parsed.svg.includes('<svg')) {
-    throw new Error('Generated response did not contain valid SVG illustration markup.');
+    throw new ProviderError(502, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'INVALID_SVG',
+      userMessage: 'Gemini did not return valid diagram graphics. Please retry or switch engine.',
+      retryable: true,
+    });
   }
 
   // Strip any accidental script tags for safety while preserving SVG graphics
@@ -204,5 +514,72 @@ CRITICAL SVG RULES:
       x: Number(Math.min(0.92, Math.max(0.08, comp.x)).toFixed(2)),
       y: Number(Math.min(0.9, Math.max(0.1, comp.y)).toFixed(2)),
     })),
+    modelUsed,
+    usedFallbackModel,
   };
+}
+
+// Cheap, non-billable cached health check (GET model metadata — consumes 0 tokens)
+interface HealthStatus {
+  configured: boolean;
+  ok: boolean;
+  model: string;
+  fallbackModel: string;
+}
+
+let cachedGeminiHealth: { expiresAt: number; status: HealthStatus } | null = null;
+let geminiDegradedUntil = 0;
+
+function markGeminiDegraded(): void {
+  geminiDegradedUntil = Date.now() + 60_000;
+  cachedGeminiHealth = null;
+}
+
+function markGeminiHealthy(): void {
+  geminiDegradedUntil = 0;
+}
+
+export async function checkGeminiHealth(): Promise<HealthStatus> {
+  const model = getGeminiPrimaryModel();
+  const fallbackModel = getGeminiFallbackModel();
+  const configured = isGeminiConfigured();
+
+  if (!configured) {
+    return { configured: false, ok: false, model, fallbackModel };
+  }
+
+  const now = Date.now();
+  if (geminiDegradedUntil > now) {
+    return { configured: true, ok: false, model, fallbackModel };
+  }
+
+  if (cachedGeminiHealth && cachedGeminiHealth.expiresAt > now) {
+    return cachedGeminiHealth.status;
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY!.trim();
+  let ok = false;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}`,
+        {
+          method: 'GET',
+          headers: { 'x-goog-api-key': apiKey },
+          signal: controller.signal,
+        }
+      );
+      ok = res.ok;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    ok = false;
+  }
+
+  const status: HealthStatus = { configured, ok, model, fallbackModel };
+  cachedGeminiHealth = { expiresAt: now + 30_000, status };
+  return status;
 }

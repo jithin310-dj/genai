@@ -3,7 +3,24 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { enhanceTechnicalPrompt, generateTechnicalDiagramSvg } from './server/gemini.ts';
+import {
+  checkGeminiHealth,
+  enhanceTechnicalPrompt,
+  generateTechnicalDiagramSvg,
+  normalizeGeminiError,
+} from './server/gemini.ts';
+import {
+  checkHfHealth,
+  checkHfRateLimit,
+  DEFAULT_HF_HEIGHT,
+  DEFAULT_HF_MODEL,
+  DEFAULT_HF_WIDTH,
+  generateHuggingFaceImage,
+  HF_MODELS,
+  isHfTokenConfigured,
+  normalizeHfError,
+} from './server/huggingface.ts';
+import { ProviderError, type ProviderId } from './server/providerUtils.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,6 +86,36 @@ function saveDataUrlToFile(dataUrl: string, filePath: string): void {
   fs.writeFileSync(filePath, buffer);
 }
 
+function parseMaxAttempts(raw: unknown): number {
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 1 && n <= 3) {
+    return n;
+  }
+  return 3;
+}
+
+function sendProviderError(
+  res: express.Response,
+  provider: ProviderId,
+  error: unknown
+): void {
+  const normalized: ProviderError =
+    error instanceof ProviderError
+      ? error
+      : provider === 'huggingface'
+        ? normalizeHfError(error, process.env.HF_TOKEN)
+        : normalizeGeminiError(error);
+
+  if (normalized.payload.retryAfterSeconds) {
+    res.setHeader('Retry-After', String(normalized.payload.retryAfterSeconds));
+  }
+
+  res.status(normalized.statusCode).json({
+    ...normalized.payload,
+    error: normalized.payload.userMessage,
+  });
+}
+
 async function startServer() {
   ensureOutputsDir();
 
@@ -78,36 +125,137 @@ async function startServer() {
   // Serve generated outputs directly from disk
   app.use('/outputs', express.static(OUTPUTS_DIR));
 
-  // Prompt Enhancement Endpoint
+  // Direct download endpoint for the converted Python + Streamlit project ZIP
+  app.get('/api/download-python-zip', (_req, res) => {
+    const zipPath = path.resolve(__dirname, 'DevIllustrate-AI-Python-Streamlit.zip');
+    if (!fs.existsSync(zipPath)) {
+      res.status(404).json({ error: 'Python project ZIP archive not found.' });
+      return;
+    }
+    res.download(zipPath, 'DevIllustrate-AI-Python-Streamlit.zip');
+  });
+
+  // Cheap, non-billable provider health check (never exposes tokens or keys)
+  app.get('/api/health', async (_req, res) => {
+    const [huggingface, gemini] = await Promise.all([
+      checkHfHealth(),
+      checkGeminiHealth(),
+    ]);
+    res.json({ huggingface, gemini });
+  });
+
+  // Hugging Face model catalog (verified live Inference Providers models; never exposes HF_TOKEN)
+  app.get('/api/hf-models', (_req, res) => {
+    res.json({
+      models: HF_MODELS,
+      defaultModel: DEFAULT_HF_MODEL,
+      defaultWidth: DEFAULT_HF_WIDTH,
+      defaultHeight: DEFAULT_HF_HEIGHT,
+      configured: isHfTokenConfigured(),
+    });
+  });
+
+  // Hugging Face Text-to-Image Generation Endpoint
+  app.post('/api/generate-image', async (req, res) => {
+    const forwarded = req.headers['x-forwarded-for'];
+    const ipKey =
+      (Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0])?.trim() ||
+      req.ip ||
+      req.socket.remoteAddress ||
+      'unknown';
+
+    const rateCheck = checkHfRateLimit(ipKey);
+    if (!rateCheck.allowed) {
+      sendProviderError(
+        res,
+        'huggingface',
+        new ProviderError(429, {
+          provider: 'huggingface',
+          providerLabel: 'Hugging Face',
+          code: 'RATE_LIMITED',
+          userMessage: `Too many requests sent to Hugging Face. Please wait ${rateCheck.retryAfterSeconds}s or switch engine.`,
+          retryable: true,
+          retryAfterSeconds: rateCheck.retryAfterSeconds,
+        })
+      );
+      return;
+    }
+
+    try {
+      const { prompt, negativePrompt, model, width, height, seed, maxAttempts } =
+        req.body ?? {};
+      const result = await generateHuggingFaceImage({
+        prompt,
+        negativePrompt,
+        model,
+        width,
+        height,
+        seed,
+        maxAttempts: parseMaxAttempts(maxAttempts),
+      });
+      res.json(result);
+    } catch (error) {
+      sendProviderError(res, 'huggingface', error);
+    }
+  });
+
+  // Prompt Enhancement Endpoint (Gemini)
   app.post('/api/enhance-prompt', async (req, res) => {
     try {
-      const { prompt, style } = req.body ?? {};
+      const { prompt, style, maxAttempts } = req.body ?? {};
       if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
-        res.status(400).json({ error: 'Please provide a technical prompt to enhance.' });
+        sendProviderError(
+          res,
+          'gemini',
+          new ProviderError(400, {
+            provider: 'gemini',
+            providerLabel: 'Gemini',
+            code: 'INVALID_PROMPT',
+            userMessage: 'Please enter a technical prompt to enhance.',
+            retryable: false,
+          })
+        );
         return;
       }
 
       const result = await enhanceTechnicalPrompt({
         prompt: prompt.trim(),
         style: typeof style === 'string' ? style : 'Professional 3D',
+        maxAttempts: parseMaxAttempts(maxAttempts),
       });
       res.json(result);
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : 'Failed to enhance prompt via Gemini API.';
-      console.error('[/api/enhance-prompt] Error:', message);
-      res.status(500).json({ error: message });
+      sendProviderError(res, 'gemini', error);
     }
   });
 
-  // Technical Illustration Generation Endpoint
+  // Technical Illustration Generation Endpoint (Gemini SVG)
   app.post('/api/generate-diagram', async (req, res) => {
     try {
-      const { prompt, enhancedPrompt, style, width, height, steps, guidanceScale, seed } =
-        req.body ?? {};
+      const {
+        prompt,
+        enhancedPrompt,
+        style,
+        width,
+        height,
+        steps,
+        guidanceScale,
+        seed,
+        maxAttempts,
+      } = req.body ?? {};
 
       if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
-        res.status(400).json({ error: 'Please provide a technical prompt to generate an illustration.' });
+        sendProviderError(
+          res,
+          'gemini',
+          new ProviderError(400, {
+            provider: 'gemini',
+            providerLabel: 'Gemini',
+            code: 'INVALID_PROMPT',
+            userMessage: 'Please enter a prompt before generating with Gemini.',
+            retryable: false,
+          })
+        );
         return;
       }
 
@@ -115,21 +263,17 @@ async function startServer() {
         prompt: prompt.trim(),
         enhancedPrompt: typeof enhancedPrompt === 'string' ? enhancedPrompt : prompt.trim(),
         style: typeof style === 'string' ? style : 'Professional 3D',
-        width: Number(width) || 1024,
+        width: Number(width) || 768,
         height: Number(height) || 768,
         steps: Number(steps) || 30,
         guidanceScale: Number(guidanceScale) || 7.5,
         seed: Number(seed) || 42,
+        maxAttempts: parseMaxAttempts(maxAttempts),
       });
 
       res.json(result);
     } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : 'Failed to generate technical illustration via Gemini API.';
-      console.error('[/api/generate-diagram] Error:', message);
-      res.status(500).json({ error: message });
+      sendProviderError(res, 'gemini', error);
     }
   });
 
@@ -181,7 +325,7 @@ async function startServer() {
         prompt: String(prompt || ''),
         enhancedPrompt: String(enhancedPrompt || ''),
         style: String(style || 'Professional 3D'),
-        width: Number(width) || 1024,
+        width: Number(width) || 768,
         height: Number(height) || 768,
         steps: Number(steps) || 30,
         guidanceScale: Number(guidanceScale) || 7.5,

@@ -4,14 +4,22 @@ import { StudioWorkspace } from './components/StudioWorkspace';
 import { TopNav } from './components/TopNav';
 import {
   buildTemplateEnhancedPrompt,
+  DEFAULT_HF_HEIGHT,
+  DEFAULT_HF_MODEL,
+  DEFAULT_HF_WIDTH,
+  HF_MODEL_OPTIONS,
   SAMPLE_PRESETS,
   STYLE_DEFINITIONS,
 } from './data/presets';
 import type {
   ComponentMarker,
   GenerationSettings,
+  HfModelOption,
   LabelingConfig,
+  ProvidersHealth,
+  RecentGenerationItem,
   SavedOutput,
+  ThemeMode,
   WorkspaceTab,
 } from './types/project';
 import { downloadDataUrlAsPng } from './utils/zipExport';
@@ -22,8 +30,91 @@ const INITIAL_ENHANCED = buildTemplateEnhancedPrompt(
   INITIAL_PRESET.style
 );
 
+const HISTORY_STORAGE_KEY = 'devillustrate_recent_history_v1';
+const THEME_STORAGE_KEY = 'devillustrate_theme_v1';
+const MAX_RECENT_HISTORY = 8;
+
+function loadInitialHistory(): RecentGenerationItem[] {
+  try {
+    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.slice(0, MAX_RECENT_HISTORY) : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadInitialTheme(): ThemeMode {
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === 'dark' || stored === 'light') return stored;
+    if (
+      typeof window !== 'undefined' &&
+      window.matchMedia?.('(prefers-color-scheme: dark)').matches
+    ) {
+      return 'dark';
+    }
+  } catch {
+    // Fallback to light
+  }
+  return 'light';
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('studio');
+  const [theme, setTheme] = useState<ThemeMode>(loadInitialTheme);
+  const [hfModels, setHfModels] = useState<HfModelOption[]>(HF_MODEL_OPTIONS);
+  const [providersHealth, setProvidersHealth] = useState<ProvidersHealth | null>(
+    null
+  );
+
+  // Sync dark mode class on <html>
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Ignore storage failures
+    }
+  }, [theme]);
+
+  // Fetch live provider configuration & health status (cheap non-billable check)
+  const refreshHealth = useCallback(async () => {
+    try {
+      const res = await fetch('/api/health');
+      if (res.ok) {
+        const data = (await res.json()) as ProvidersHealth;
+        if (data?.huggingface && data?.gemini) {
+          setProvidersHealth(data);
+        }
+      }
+    } catch {
+      // Non-fatal if health probe fails transiently
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshHealth();
+  }, [refreshHealth]);
+
+  // Fetch verified Hugging Face models from server
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/hf-models')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && Array.isArray(data?.models) && data.models.length > 0) {
+          setHfModels(data.models as HfModelOption[]);
+        }
+      })
+      .catch(() => {
+        // Keep bundled verified fallback list
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Studio State
   const [prompt, setPrompt] = useState(INITIAL_PRESET.prompt);
@@ -34,11 +125,13 @@ export default function App() {
     INITIAL_ENHANCED.negativePrompt
   );
   const [settings, setSettings] = useState<GenerationSettings>({
+    engine: 'huggingface',
+    hfModel: DEFAULT_HF_MODEL,
     style: INITIAL_PRESET.style,
     steps: 30,
     guidanceScale: 7.5,
-    width: 1024,
-    height: 768,
+    width: DEFAULT_HF_WIDTH,
+    height: DEFAULT_HF_HEIGHT,
     seed: INITIAL_PRESET.seed,
   });
   const [originalImageUrl, setOriginalImageUrl] = useState(
@@ -56,6 +149,44 @@ export default function App() {
     showMarkerTags: false,
     markerColor: STYLE_DEFINITIONS[INITIAL_PRESET.style].defaultMarkerColor,
   });
+
+  // Recent 8 Generations Strip (persisted in localStorage)
+  const [recentHistory, setRecentHistory] =
+    useState<RecentGenerationItem[]>(loadInitialHistory);
+
+  const persistHistory = (items: RecentGenerationItem[]) => {
+    const trimmed = items.slice(0, MAX_RECENT_HISTORY);
+    try {
+      window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(trimmed));
+    } catch {
+      // If quota exceeded, keep fewer items in localStorage while preserving in-memory list
+      try {
+        window.localStorage.setItem(
+          HISTORY_STORAGE_KEY,
+          JSON.stringify(trimmed.slice(0, 4))
+        );
+      } catch {
+        // Ignore
+      }
+    }
+  };
+
+  const handleAddRecentHistory = (item: RecentGenerationItem) => {
+    setRecentHistory((prev) => {
+      const next = [item, ...prev].slice(0, MAX_RECENT_HISTORY);
+      persistHistory(next);
+      return next;
+    });
+  };
+
+  const handleClearRecentHistory = () => {
+    setRecentHistory([]);
+    try {
+      window.localStorage.removeItem(HISTORY_STORAGE_KEY);
+    } catch {
+      // Ignore
+    }
+  };
 
   // Saved outputs/ Directory State
   const [savedOutputs, setSavedOutputs] = useState<SavedOutput[]>([]);
@@ -127,6 +258,7 @@ export default function App() {
     setPrompt(output.prompt);
     setEnhancedPrompt(output.enhancedPrompt);
     setSettings({
+      ...settings,
       style: output.style,
       width: output.width,
       height: output.height,
@@ -159,12 +291,14 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-[#0F172A]">
+    <div className="min-h-screen bg-[#F8FAFC] text-[#0F172A] transition-colors duration-150 dark:bg-[#0B1120] dark:text-slate-100">
       <TopNav
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         onDownloadPng={handleDownloadPng}
         canDownload={Boolean(labeledImageUrl)}
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
       />
 
       <main>
@@ -178,6 +312,9 @@ export default function App() {
             setNegativePrompt={setNegativePrompt}
             settings={settings}
             setSettings={setSettings}
+            hfModels={hfModels}
+            providersHealth={providersHealth}
+            onRefreshHealth={refreshHealth}
             originalImageUrl={originalImageUrl}
             setOriginalImageUrl={setOriginalImageUrl}
             labeledImageUrl={labeledImageUrl}
@@ -186,6 +323,9 @@ export default function App() {
             setComponents={setComponents}
             labelingConfig={labelingConfig}
             setLabelingConfig={setLabelingConfig}
+            recentHistory={recentHistory}
+            onAddRecentHistory={handleAddRecentHistory}
+            onClearRecentHistory={handleClearRecentHistory}
             onSaveToOutputs={handleSaveToOutputs}
             onDownloadPng={handleDownloadPng}
           />

@@ -1,4 +1,35 @@
-import type { SamplePreset, VisualStyle } from '../types/project';
+import type { HfModelOption, SamplePreset, VisualStyle } from '../types/project';
+
+export const HF_MODEL_OPTIONS: HfModelOption[] = [
+  {
+    id: 'black-forest-labs/FLUX.1-schnell',
+    label: 'FLUX.1 Schnell (Fast · Default)',
+    description: 'Fast 4-step generation — lowest credit usage',
+    badge: 'Fast',
+  },
+  {
+    id: 'black-forest-labs/FLUX.1-dev',
+    label: 'FLUX.1 Dev (High Quality)',
+    description: 'Higher detail and prompt fidelity — uses more credits',
+    badge: 'High Quality',
+  },
+  {
+    id: 'stabilityai/stable-diffusion-3.5-large',
+    label: 'Stable Diffusion 3.5 Large',
+    description: 'Strong composition and complex scene adherence',
+    badge: 'Detailed',
+  },
+  {
+    id: 'stabilityai/stable-diffusion-xl-base-1.0',
+    label: 'Stable Diffusion XL 1.0',
+    description: 'Classic SDXL base model with strong negative prompt support',
+    badge: 'Classic SDXL',
+  },
+];
+
+export const DEFAULT_HF_MODEL = HF_MODEL_OPTIONS[0].id;
+export const DEFAULT_HF_WIDTH = 768;
+export const DEFAULT_HF_HEIGHT = 768;
 
 export interface StyleDefinition {
   id: VisualStyle;
@@ -48,10 +79,11 @@ export const STYLE_DEFINITIONS: Record<VisualStyle, StyleDefinition> = {
 };
 
 export const RESOLUTION_OPTIONS = [
-  { label: '512 × 512 (Square)', width: 512, height: 512 },
+  { label: '512 × 512 (Square · Lowest Credits)', width: 512, height: 512 },
+  { label: '768 × 768 (Square · Default)', width: 768, height: 768 },
   { label: '768 × 576 (4:3 Standard)', width: 768, height: 576 },
-  { label: '1024 × 768 (4:3 HD Docs)', width: 1024, height: 768 },
-  { label: '1024 × 1024 (Square HD)', width: 1024, height: 1024 },
+  { label: '1024 × 768 (4:3 HD · More Credits)', width: 1024, height: 768 },
+  { label: '1024 × 1024 (Square HD · More Credits)', width: 1024, height: 1024 },
 ];
 
 export const MARKER_COLOR_OPTIONS = [
