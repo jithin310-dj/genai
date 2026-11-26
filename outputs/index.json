@@ -1,1 +1,147 @@
-[]
+[
+  {
+    "id": "diagram_1795651711244_xiogu",
+    "title": "Cloud Computing Architecture Diagram",
+    "prompt": "Create a cloud computing architecture diagram.",
+    "enhancedPrompt": "Create a cloud computing architecture diagram, clean professional 3D technical documentation illustration, modular industrial hardware geometry, studio diffused lighting, soft ambient occlusion, crisp directional data pathways, neutral off-white studio backdrop, sharp focus, zero embedded text or letters",
+    "style": "Professional 3D",
+    "width": 512,
+    "height": 512,
+    "steps": 30,
+    "guidanceScale": 7.5,
+    "seed": 4219,
+    "createdAt": "2026-11-26T00:08:31.245Z",
+    "originalFile": "/outputs/cloud_computing_architecture_diagram_diagram_1795651711244_xiogu_original.png",
+    "labeledFile": "/outputs/cloud_computing_architecture_diagram_diagram_1795651711244_xiogu_labeled.png",
+    "componentCount": 6,
+    "components": [
+      {
+        "id": "gen-comp-1795651711018-0",
+        "name": "Load Balancer",
+        "description": "Primary traffic distribution node",
+        "x": 0.25,
+        "y": 0.27
+      },
+      {
+        "id": "gen-comp-1795651711018-1",
+        "name": "API Gateway",
+        "description": "Central entry point for services",
+        "x": 0.54,
+        "y": 0.33
+      },
+      {
+        "id": "gen-comp-1795651711018-2",
+        "name": "Data Storage",
+        "description": "Persistent storage cylinder",
+        "x": 0.75,
+        "y": 0.27
+      },
+      {
+        "id": "gen-comp-1795651711018-3",
+        "name": "Compute Node A",
+        "description": "Processing cluster terminal",
+        "x": 0.29,
+        "y": 0.72
+      },
+      {
+        "id": "gen-comp-1795651711018-4",
+        "name": "Compute Node B",
+        "description": "Secondary processing cluster",
+        "x": 0.54,
+        "y": 0.72
+      },
+      {
+        "id": "gen-comp-1795651711018-5",
+        "name": "Database Cluster",
+        "description": "Back-end data repository",
+        "x": 0.75,
+        "y": 0.72
+      }
+    ],
+    "evaluation": {
+      "ratings": {
+        "promptAlignment": 4,
+        "visualQuality": 4,
+        "technicalRelevance": 4,
+        "clarity": 4,
+        "composition": 4,
+        "styleConsistency": 4,
+        "readability": 4,
+        "documentationSuitability": 4,
+        "marketingSuitability": 4
+      },
+      "averageScore": 4,
+      "notes": "",
+      "evaluatedAt": "2026-11-26T00:04:55.093Z"
+    }
+  },
+  {
+    "id": "diagram_1795651640751_l3w98",
+    "title": "Cloud Computing Architecture Diagram",
+    "prompt": "Create a cloud computing architecture diagram.",
+    "enhancedPrompt": "Create a cloud computing architecture diagram, clean professional 3D technical documentation illustration, modular industrial hardware geometry, studio diffused lighting, soft ambient occlusion, crisp directional data pathways, neutral off-white studio backdrop, sharp focus, zero embedded text or letters",
+    "style": "Professional 3D",
+    "width": 768,
+    "height": 768,
+    "steps": 30,
+    "guidanceScale": 7.5,
+    "seed": 4219,
+    "createdAt": "2026-11-26T00:07:20.753Z",
+    "originalFile": "/outputs/cloud_computing_architecture_diagram_diagram_1795651640751_l3w98_original.png",
+    "labeledFile": "/outputs/cloud_computing_architecture_diagram_diagram_1795651640751_l3w98_labeled.png",
+    "componentCount": 5,
+    "components": [
+      {
+        "id": "gen-comp-1795651640412-0",
+        "name": "Client Gateway",
+        "description": "Initial entry point for user requests",
+        "x": 0.23,
+        "y": 0.25
+      },
+      {
+        "id": "gen-comp-1795651640412-1",
+        "name": "Load Balancer",
+        "description": "Distributes incoming traffic across services",
+        "x": 0.53,
+        "y": 0.19
+      },
+      {
+        "id": "gen-comp-1795651640412-2",
+        "name": "Cache Layer",
+        "description": "High-speed in-memory data store",
+        "x": 0.75,
+        "y": 0.22
+      },
+      {
+        "id": "gen-comp-1795651640412-3",
+        "name": "Application Server Cluster",
+        "description": "Core logic processing unit",
+        "x": 0.31,
+        "y": 0.64
+      },
+      {
+        "id": "gen-comp-1795651640412-4",
+        "name": "Database Storage",
+        "description": "Persistent data storage repository",
+        "x": 0.69,
+        "y": 0.69
+      }
+    ],
+    "evaluation": {
+      "ratings": {
+        "promptAlignment": 4,
+        "visualQuality": 4,
+        "technicalRelevance": 4,
+        "clarity": 4,
+        "composition": 4,
+        "styleConsistency": 4,
+        "readability": 4,
+        "documentationSuitability": 4,
+        "marketingSuitability": 4
+      },
+      "averageScore": 4,
+      "notes": "",
+      "evaluatedAt": "2026-11-26T00:04:55.093Z"
+    }
+  }
+]

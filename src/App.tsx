@@ -7,6 +7,7 @@ import {
   DEFAULT_HF_HEIGHT,
   DEFAULT_HF_MODEL,
   DEFAULT_HF_WIDTH,
+  DEFAULT_QUALITY_RATINGS,
   HF_MODEL_OPTIONS,
   SAMPLE_PRESETS,
   STYLE_DEFINITIONS,
@@ -17,8 +18,10 @@ import type {
   HfModelOption,
   LabelingConfig,
   ProvidersHealth,
+  QualityEvaluation,
   RecentGenerationItem,
   SavedOutput,
+  SavedStyleConfig,
   ThemeMode,
   WorkspaceTab,
 } from './types/project';
@@ -32,7 +35,17 @@ const INITIAL_ENHANCED = buildTemplateEnhancedPrompt(
 
 const HISTORY_STORAGE_KEY = 'devillustrate_recent_history_v1';
 const THEME_STORAGE_KEY = 'devillustrate_theme_v1';
+const STYLE_CONFIGS_STORAGE_KEY = 'devillustrate_style_configs_v1';
 const MAX_RECENT_HISTORY = 8;
+
+function createDefaultEvaluation(): QualityEvaluation {
+  return {
+    ratings: { ...DEFAULT_QUALITY_RATINGS },
+    averageScore: 4,
+    notes: '',
+    evaluatedAt: new Date().toISOString(),
+  };
+}
 
 function loadInitialHistory(): RecentGenerationItem[] {
   try {
@@ -40,6 +53,17 @@ function loadInitialHistory(): RecentGenerationItem[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.slice(0, MAX_RECENT_HISTORY) : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadInitialStyleConfigs(): SavedStyleConfig[] {
+  try {
+    const raw = window.localStorage.getItem(STYLE_CONFIGS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as SavedStyleConfig[]) : [];
   } catch {
     return [];
   }
@@ -80,9 +104,9 @@ export default function App() {
   }, [theme]);
 
   // Fetch live provider configuration & health status (cheap non-billable check)
-  const refreshHealth = useCallback(async () => {
+  const refreshHealth = useCallback(async (force = false) => {
     try {
-      const res = await fetch('/api/health');
+      const res = await fetch(force ? '/api/health?refresh=1' : '/api/health');
       if (res.ok) {
         const data = (await res.json()) as ProvidersHealth;
         if (data?.huggingface && data?.gemini) {
@@ -133,6 +157,8 @@ export default function App() {
     width: DEFAULT_HF_WIDTH,
     height: DEFAULT_HF_HEIGHT,
     seed: INITIAL_PRESET.seed,
+    quantity: 1,
+    applyStyleToHf: true,
   });
   const [originalImageUrl, setOriginalImageUrl] = useState(
     INITIAL_PRESET.imageUrl
@@ -150,6 +176,47 @@ export default function App() {
     markerColor: STYLE_DEFINITIONS[INITIAL_PRESET.style].defaultMarkerColor,
   });
 
+  // Quality Evaluation State
+  const [evaluation, setEvaluation] = useState<QualityEvaluation>(
+    createDefaultEvaluation
+  );
+  const [activeSavedOutputId, setActiveSavedOutputId] = useState<string | null>(
+    null
+  );
+
+  // Reusable Style Configurations (localStorage)
+  const [savedStyleConfigs, setSavedStyleConfigs] = useState<SavedStyleConfig[]>(
+    loadInitialStyleConfigs
+  );
+
+  const persistStyleConfigs = (items: SavedStyleConfig[]) => {
+    try {
+      window.localStorage.setItem(STYLE_CONFIGS_STORAGE_KEY, JSON.stringify(items));
+    } catch {
+      // Ignore storage quota issues
+    }
+  };
+
+  const handleSaveStyleConfig = (config: Omit<SavedStyleConfig, 'id'>) => {
+    const created: SavedStyleConfig = {
+      ...config,
+      id: `style_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    };
+    setSavedStyleConfigs((prev) => {
+      const next = [created, ...prev].slice(0, 12);
+      persistStyleConfigs(next);
+      return next;
+    });
+  };
+
+  const handleDeleteStyleConfig = (id: string) => {
+    setSavedStyleConfigs((prev) => {
+      const next = prev.filter((item) => item.id !== id);
+      persistStyleConfigs(next);
+      return next;
+    });
+  };
+
   // Recent 8 Generations Strip (persisted in localStorage)
   const [recentHistory, setRecentHistory] =
     useState<RecentGenerationItem[]>(loadInitialHistory);
@@ -159,7 +226,6 @@ export default function App() {
     try {
       window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(trimmed));
     } catch {
-      // If quota exceeded, keep fewer items in localStorage while preserving in-memory list
       try {
         window.localStorage.setItem(
           HISTORY_STORAGE_KEY,
@@ -214,15 +280,21 @@ export default function App() {
   const handleSaveToOutputs = async ({
     originalDataUrl,
     labeledDataUrl,
+    seedOverride,
+    titleOverride,
+    componentsOverride,
   }: {
     originalDataUrl: string;
     labeledDataUrl: string;
-  }) => {
+    seedOverride?: number;
+    titleOverride?: string;
+    componentsOverride?: ComponentMarker[];
+  }): Promise<string | null> => {
     const res = await fetch('/api/outputs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        title: labelingConfig.title,
+        title: titleOverride ?? labelingConfig.title,
         prompt,
         enhancedPrompt,
         style: settings.style,
@@ -230,10 +302,11 @@ export default function App() {
         height: settings.height,
         steps: settings.steps,
         guidanceScale: settings.guidanceScale,
-        seed: settings.seed,
+        seed: seedOverride ?? settings.seed,
         originalDataUrl,
         labeledDataUrl,
-        components,
+        components: componentsOverride ?? components,
+        evaluation,
       }),
     });
     const data = await res.json();
@@ -241,7 +314,38 @@ export default function App() {
       throw new Error(data.error || 'Failed to archive PNG in outputs/.');
     }
     if (data.output) {
-      setSavedOutputs((prev) => [data.output as SavedOutput, ...prev]);
+      const created = data.output as SavedOutput;
+      setSavedOutputs((prev) => [created, ...prev]);
+      setActiveSavedOutputId(created.id);
+      return created.id;
+    }
+    return null;
+  };
+
+  const handlePersistEvaluation = async (
+    nextEval: QualityEvaluation
+  ): Promise<boolean> => {
+    if (!activeSavedOutputId) return false;
+    try {
+      const res = await fetch(
+        `/api/outputs/${encodeURIComponent(activeSavedOutputId)}/evaluation`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(nextEval),
+        }
+      );
+      if (!res.ok) return false;
+      const data = await res.json();
+      if (data.output) {
+        const updated = data.output as SavedOutput;
+        setSavedOutputs((prev) =>
+          prev.map((item) => (item.id === updated.id ? updated : item))
+        );
+      }
+      return true;
+    } catch {
+      return false;
     }
   };
 
@@ -251,6 +355,9 @@ export default function App() {
     });
     if (res.ok) {
       setSavedOutputs((prev) => prev.filter((item) => item.id !== id));
+      if (activeSavedOutputId === id) {
+        setActiveSavedOutputId(null);
+      }
     }
   };
 
@@ -278,6 +385,8 @@ export default function App() {
       markerColor:
         STYLE_DEFINITIONS[output.style]?.defaultMarkerColor ?? '#1D4ED8',
     });
+    setActiveSavedOutputId(output.id);
+    setEvaluation(output.evaluation ?? createDefaultEvaluation());
     setActiveTab('studio');
   };
 
@@ -328,6 +437,13 @@ export default function App() {
             onClearRecentHistory={handleClearRecentHistory}
             onSaveToOutputs={handleSaveToOutputs}
             onDownloadPng={handleDownloadPng}
+            evaluation={evaluation}
+            setEvaluation={setEvaluation}
+            activeSavedOutputId={activeSavedOutputId}
+            onPersistEvaluation={handlePersistEvaluation}
+            savedStyleConfigs={savedStyleConfigs}
+            onSaveStyleConfig={handleSaveStyleConfig}
+            onDeleteStyleConfig={handleDeleteStyleConfig}
           />
         )}
 

@@ -59,12 +59,10 @@ export function normalizeGeminiError(error: unknown): ProviderError {
     [apiKey]
   );
   const lower = rawMessage.toLowerCase();
-
-  // Log full raw error strictly on the server (stdout so handled upstream errors don't trigger unhandled stderr alerts)
-  console.info('[Gemini upstream]', { status, message: rawMessage });
+  let normalized: ProviderError;
 
   if (isNetworkOrTimeoutError(error)) {
-    return new ProviderError(504, {
+    normalized = new ProviderError(504, {
       provider: 'gemini',
       providerLabel: 'Gemini',
       code: 'TIMEOUT',
@@ -73,16 +71,14 @@ export function normalizeGeminiError(error: unknown): ProviderError {
       retryable: true,
       retryAfterSeconds: 3,
     });
-  }
-
-  if (
+  } else if (
     status === 401 ||
     status === 403 ||
     lower.includes('api_key_invalid') ||
     lower.includes('api key not valid') ||
     lower.includes('permission_denied')
   ) {
-    return new ProviderError(status === 403 ? 403 : 401, {
+    normalized = new ProviderError(status === 403 ? 403 : 401, {
       provider: 'gemini',
       providerLabel: 'Gemini',
       code: 'INVALID_TOKEN',
@@ -90,10 +86,8 @@ export function normalizeGeminiError(error: unknown): ProviderError {
         'Gemini API key is invalid or lacks permission. Check GEMINI_API_KEY in Settings > Secrets.',
       retryable: false,
     });
-  }
-
-  if (status === 400 || lower.includes('invalid_argument')) {
-    return new ProviderError(400, {
+  } else if (status === 400 || lower.includes('invalid_argument')) {
+    normalized = new ProviderError(400, {
       provider: 'gemini',
       providerLabel: 'Gemini',
       code: 'INVALID_REQUEST',
@@ -101,10 +95,8 @@ export function normalizeGeminiError(error: unknown): ProviderError {
         'Gemini could not process this prompt or request parameters. Try shortening or simplifying the prompt.',
       retryable: false,
     });
-  }
-
-  if (status === 404 || lower.includes('not_found')) {
-    return new ProviderError(502, {
+  } else if (status === 404 || lower.includes('not_found')) {
+    normalized = new ProviderError(502, {
       provider: 'gemini',
       providerLabel: 'Gemini',
       code: 'MODEL_NOT_FOUND',
@@ -112,15 +104,13 @@ export function normalizeGeminiError(error: unknown): ProviderError {
         'The configured Gemini model ID was not found. Check GEMINI_MODEL in your server environment.',
       retryable: false,
     });
-  }
-
-  if (
+  } else if (
     status === 429 ||
     lower.includes('resource_exhausted') ||
     lower.includes('quota') ||
     lower.includes('rate limit')
   ) {
-    return new ProviderError(429, {
+    normalized = new ProviderError(429, {
       provider: 'gemini',
       providerLabel: 'Gemini',
       code: 'QUOTA_EXCEEDED',
@@ -129,9 +119,7 @@ export function normalizeGeminiError(error: unknown): ProviderError {
       retryable: true,
       retryAfterSeconds: 10,
     });
-  }
-
-  if (
+  } else if (
     status === 503 ||
     status === 502 ||
     status === 504 ||
@@ -139,7 +127,7 @@ export function normalizeGeminiError(error: unknown): ProviderError {
     lower.includes('high demand') ||
     lower.includes('overloaded')
   ) {
-    return new ProviderError(503, {
+    normalized = new ProviderError(503, {
       provider: 'gemini',
       providerLabel: 'Gemini',
       code: 'MODEL_UNAVAILABLE',
@@ -148,16 +136,21 @@ export function normalizeGeminiError(error: unknown): ProviderError {
       retryable: true,
       retryAfterSeconds: 5,
     });
+  } else {
+    normalized = new ProviderError(502, {
+      provider: 'gemini',
+      providerLabel: 'Gemini',
+      code: 'UPSTREAM_ERROR',
+      userMessage:
+        'Gemini encountered an unexpected error while generating. Please retry or switch engine.',
+      retryable: status >= 500 || status === 0,
+    });
   }
 
-  return new ProviderError(502, {
-    provider: 'gemini',
-    providerLabel: 'Gemini',
-    code: 'UPSTREAM_ERROR',
-    userMessage:
-      'Gemini encountered an unexpected error while generating. Please retry or switch engine.',
-    retryable: status >= 500 || status === 0,
-  });
+  console.info(
+    `[Gemini] upstream status=${status || 'unknown'} code=${normalized.payload.code}`
+  );
+  return normalized;
 }
 
 function shouldFallbackToSecondaryModel(err: ProviderError): boolean {
@@ -539,13 +532,18 @@ function markGeminiHealthy(): void {
   geminiDegradedUntil = 0;
 }
 
-export async function checkGeminiHealth(): Promise<HealthStatus> {
+export async function checkGeminiHealth(forceRefresh = false): Promise<HealthStatus> {
   const model = getGeminiPrimaryModel();
   const fallbackModel = getGeminiFallbackModel();
   const configured = isGeminiConfigured();
 
   if (!configured) {
     return { configured: false, ok: false, model, fallbackModel };
+  }
+
+  if (forceRefresh) {
+    geminiDegradedUntil = 0;
+    cachedGeminiHealth = null;
   }
 
   const now = Date.now();

@@ -65,7 +65,15 @@ Open `http://localhost:8501` in your browser.
 !dpkg -i cloudflared-linux-amd64.deb > /dev/null 2>&1
 ```
 
-3. Start Streamlit and create a public HTTPS URL:
+3. Verify PyTorch, Diffusers, CUDA GPU, and generate a real test PNG before launching the UI:
+
+```python
+!python DevIllustrate-AI/verify_runtime.py --run-generation --width 512 --height 512 --steps 20
+```
+
+Expected output: `"dependencies_ready": true`, `"device_label": "CUDA GPU"`, `"generation_verified": true`, and a non-empty PNG saved at `DevIllustrate-AI/outputs/runtime_verification_test.png`.
+
+4. Start Streamlit and create a public HTTPS URL:
 
 ```python
 import subprocess, time
@@ -77,3 +85,10 @@ subprocess.Popen([
 time.sleep(4)
 !cloudflared tunnel --url http://localhost:8501
 ```
+
+5. Optional VRAM optimization (if running `1024×1024` or larger models on a 15 GB T4 GPU):
+
+```python
+%env SD_CPU_OFFLOAD=1
+```
+

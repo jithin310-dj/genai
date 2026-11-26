@@ -6,6 +6,65 @@ export type ImageEngine = 'huggingface' | 'gemini';
 
 export type ThemeMode = 'light' | 'dark';
 
+export type TechnicalDomain =
+  | 'Software Architecture'
+  | 'System Design'
+  | 'Workflow Diagram'
+  | 'Database Architecture'
+  | 'API Communication'
+  | 'Network Architecture'
+  | 'Cloud Computing'
+  | 'AI/ML Workflow'
+  | 'Developer Tutorial'
+  | 'Product & Marketing';
+
+export type TargetAudience = 'Technical Documentation' | 'Developer Tutorial' | 'Product & Marketing';
+
+export type QualityCriterionKey =
+  | 'promptAlignment'
+  | 'visualQuality'
+  | 'technicalRelevance'
+  | 'clarity'
+  | 'composition'
+  | 'styleConsistency'
+  | 'readability'
+  | 'documentationSuitability'
+  | 'marketingSuitability';
+
+export type QualityRatings = Record<QualityCriterionKey, number>;
+
+export interface QualityEvaluation {
+  ratings: QualityRatings;
+  averageScore: number;
+  notes: string;
+  evaluatedAt: string;
+}
+
+export interface SavedStyleConfig {
+  id: string;
+  name: string;
+  style: VisualStyle;
+  markerColor: string;
+  steps: number;
+  guidanceScale: number;
+  width: number;
+  height: number;
+  negativePrompt: string;
+}
+
+export interface BatchVariation {
+  id: string;
+  imageUrl: string;
+  seed: number;
+  engine: ImageEngine;
+  model: string;
+  width: number;
+  height: number;
+  title: string;
+  subtitle: string;
+  components?: ComponentMarker[];
+}
+
 export interface HfModelOption {
   id: string;
   label: string;
@@ -45,6 +104,8 @@ export interface GenerationSettings {
   width: number;
   height: number;
   seed: number;
+  quantity: number;
+  applyStyleToHf: boolean;
 }
 
 export interface RecentGenerationItem {
@@ -92,6 +153,16 @@ export interface SamplePreset {
   components: ComponentMarker[];
 }
 
+export interface TechnicalPromptTemplate {
+  id: string;
+  domain: TechnicalDomain;
+  label: string;
+  recommendedStyle: VisualStyle;
+  defaultAudience: TargetAudience;
+  subjectHint: string;
+  promptTemplate: string;
+}
+
 export interface SavedOutput {
   id: string;
   title: string;
@@ -108,4 +179,5 @@ export interface SavedOutput {
   labeledFile: string;
   componentCount: number;
   components: ComponentMarker[];
+  evaluation?: QualityEvaluation;
 }

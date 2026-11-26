@@ -6,6 +6,7 @@ Mirrors src/data/presets.ts and src/index.css from the original React + Express 
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -37,7 +38,8 @@ THEME = {
 }
 
 # Default Stable Diffusion Model (Hugging Face Diffusers)
-DEFAULT_MODEL_ID = "runwayml/stable-diffusion-v1-5"
+# Uses the active public community mirror (runwayml/stable-diffusion-v1-5 was removed from HF Hub)
+DEFAULT_MODEL_ID = os.getenv("SD_MODEL_ID", "stable-diffusion-v1-5/stable-diffusion-v1-5")
 
 # Generation Parameter Bounds & Defaults
 DEFAULT_STEPS = 30

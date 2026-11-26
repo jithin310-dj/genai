@@ -28,6 +28,13 @@ const __dirname = path.dirname(__filename);
 const OUTPUTS_DIR = path.resolve(__dirname, 'outputs');
 const METADATA_FILE = path.join(OUTPUTS_DIR, 'index.json');
 
+interface QualityEvaluationRecord {
+  ratings: Record<string, number>;
+  averageScore: number;
+  notes: string;
+  evaluatedAt: string;
+}
+
 interface SavedOutputRecord {
   id: string;
   title: string;
@@ -50,6 +57,43 @@ interface SavedOutputRecord {
     x: number;
     y: number;
   }>;
+  evaluation?: QualityEvaluationRecord;
+}
+
+function sanitizeEvaluation(raw: unknown): QualityEvaluationRecord | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (!obj.ratings || typeof obj.ratings !== 'object') return undefined;
+
+  const allowedKeys = [
+    'promptAlignment',
+    'visualQuality',
+    'technicalRelevance',
+    'clarity',
+    'composition',
+    'styleConsistency',
+    'readability',
+    'documentationSuitability',
+    'marketingSuitability',
+  ];
+  const ratings: Record<string, number> = {};
+  let sum = 0;
+  for (const key of allowedKeys) {
+    const val = Number((obj.ratings as Record<string, unknown>)[key]);
+    const clamped = Number.isFinite(val) ? Math.min(5, Math.max(1, Math.round(val))) : 3;
+    ratings[key] = clamped;
+    sum += clamped;
+  }
+
+  return {
+    ratings,
+    averageScore: Number((sum / allowedKeys.length).toFixed(2)),
+    notes: typeof obj.notes === 'string' ? obj.notes.trim().slice(0, 1000) : '',
+    evaluatedAt:
+      typeof obj.evaluatedAt === 'string' && obj.evaluatedAt.trim()
+        ? obj.evaluatedAt
+        : new Date().toISOString(),
+  };
 }
 
 function ensureOutputsDir(): void {
@@ -122,8 +166,11 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '25mb' }));
 
-  // Serve generated outputs directly from disk
+  // Serve generated outputs directly from disk; return 404 for missing files instead of SPA HTML fallback
   app.use('/outputs', express.static(OUTPUTS_DIR));
+  app.use('/outputs', (_req, res) => {
+    res.status(404).json({ error: 'Output file not found.' });
+  });
 
   // Direct download endpoint for the converted Python + Streamlit project ZIP
   app.get('/api/download-python-zip', (_req, res) => {
@@ -135,11 +182,26 @@ async function startServer() {
     res.download(zipPath, 'DevIllustrate-AI-Python-Streamlit.zip');
   });
 
+  // Direct download endpoint for the Google Colab T4 GPU verification notebook
+  app.get('/api/download-colab-notebook', (_req, res) => {
+    const nbPath = path.resolve(
+      __dirname,
+      'DevIllustrate-AI',
+      'DevIllustrate_Colab_T4_Verification.ipynb'
+    );
+    if (!fs.existsSync(nbPath)) {
+      res.status(404).json({ error: 'Colab verification notebook not found.' });
+      return;
+    }
+    res.download(nbPath, 'DevIllustrate_Colab_T4_Verification.ipynb');
+  });
+
   // Cheap, non-billable provider health check (never exposes tokens or keys)
-  app.get('/api/health', async (_req, res) => {
+  app.get('/api/health', async (req, res) => {
+    const forceRefresh = req.query.refresh === '1';
     const [huggingface, gemini] = await Promise.all([
-      checkHfHealth(),
-      checkGeminiHealth(),
+      checkHfHealth(forceRefresh),
+      checkGeminiHealth(forceRefresh),
     ]);
     res.json({ huggingface, gemini });
   });
@@ -182,14 +244,25 @@ async function startServer() {
     }
 
     try {
-      const { prompt, negativePrompt, model, width, height, seed, maxAttempts } =
-        req.body ?? {};
+      const {
+        prompt,
+        negativePrompt,
+        model,
+        width,
+        height,
+        steps,
+        guidanceScale,
+        seed,
+        maxAttempts,
+      } = req.body ?? {};
       const result = await generateHuggingFaceImage({
         prompt,
         negativePrompt,
         model,
         width,
         height,
+        steps,
+        guidanceScale,
         seed,
         maxAttempts: parseMaxAttempts(maxAttempts),
       });
@@ -299,6 +372,7 @@ async function startServer() {
         originalDataUrl,
         labeledDataUrl,
         components,
+        evaluation,
       } = req.body ?? {};
 
       if (!originalDataUrl || !labeledDataUrl) {
@@ -319,6 +393,8 @@ async function startServer() {
       saveDataUrlToFile(originalDataUrl, path.join(OUTPUTS_DIR, originalFileName));
       saveDataUrlToFile(labeledDataUrl, path.join(OUTPUTS_DIR, labeledFileName));
 
+      const parsedEvaluation = sanitizeEvaluation(evaluation);
+
       const record: SavedOutputRecord = {
         id,
         title: String(title || 'Technical Architecture Diagram'),
@@ -335,6 +411,7 @@ async function startServer() {
         labeledFile: `/outputs/${labeledFileName}`,
         componentCount: Array.isArray(components) ? components.length : 0,
         components: Array.isArray(components) ? components : [],
+        ...(parsedEvaluation ? { evaluation: parsedEvaluation } : {}),
       };
 
       const existing = readOutputIndex();
@@ -345,6 +422,32 @@ async function startServer() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to save output to disk.';
       console.error('[/api/outputs POST] Error:', message);
+      res.status(500).json({ error: message });
+    }
+  });
+
+  // Update quality evaluation for a saved output
+  app.patch('/api/outputs/:id/evaluation', (req, res) => {
+    try {
+      const { id } = req.params;
+      const sanitized = sanitizeEvaluation(req.body);
+      if (!sanitized) {
+        res.status(400).json({ error: 'Valid quality evaluation ratings are required.' });
+        return;
+      }
+
+      const existing = readOutputIndex();
+      const idx = existing.findIndex((item) => item.id === id);
+      if (idx === -1) {
+        res.status(404).json({ error: 'Output not found.' });
+        return;
+      }
+
+      existing[idx] = { ...existing[idx], evaluation: sanitized };
+      writeOutputIndex(existing);
+      res.json({ output: existing[idx] });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save evaluation.';
       res.status(500).json({ error: message });
     }
   });

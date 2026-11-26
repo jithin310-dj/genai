@@ -1,4 +1,16 @@
-import type { HfModelOption, SamplePreset, VisualStyle } from '../types/project';
+import sampleClientServerImg from '../assets/images/sample_client_server_1795190847619.jpg';
+import sampleCloudArchitectureImg from '../assets/images/sample_cloud_architecture_1795190848104.jpg';
+import sampleDatabaseSystemImg from '../assets/images/sample_database_system_1795190850468.jpg';
+import sampleNeuralNetworkImg from '../assets/images/sample_neural_network_1795190847354.jpg';
+import type {
+  HfModelOption,
+  QualityCriterionKey,
+  QualityRatings,
+  SamplePreset,
+  TargetAudience,
+  TechnicalPromptTemplate,
+  VisualStyle,
+} from '../types/project';
 
 export const HF_MODEL_OPTIONS: HfModelOption[] = [
   {
@@ -37,6 +49,8 @@ export interface StyleDefinition {
   promptTemplate: string;
   negativePrompt: string;
   defaultMarkerColor: string;
+  palette: string[];
+  backgroundNote: string;
 }
 
 export const STYLE_DEFINITIONS: Record<VisualStyle, StyleDefinition> = {
@@ -48,6 +62,8 @@ export const STYLE_DEFINITIONS: Record<VisualStyle, StyleDefinition> = {
     negativePrompt:
       'blurry, low resolution, watermark, distorted text, garbled letters, messy cables, cartoon characters, noisy background, oversaturated neon',
     defaultMarkerColor: '#1D4ED8',
+    palette: ['#F6F7F9', '#0F172A', '#1D4ED8', '#38BDF8', '#94A3B8'],
+    backgroundNote: 'Neutral off-white studio backdrop',
   },
   'Flat Vector': {
     id: 'Flat Vector',
@@ -57,6 +73,8 @@ export const STYLE_DEFINITIONS: Record<VisualStyle, StyleDefinition> = {
     negativePrompt:
       '3D shading, photorealistic, blurry, watermark, text, illegible labels, sketchy lines, cluttered background, gradients',
     defaultMarkerColor: '#0F172A',
+    palette: ['#F8FAFC', '#0F172A', '#2563EB', '#0D9488', '#CBD5E1'],
+    backgroundNote: 'Clean cool-white editorial canvas',
   },
   Blueprint: {
     id: 'Blueprint',
@@ -66,6 +84,8 @@ export const STYLE_DEFINITIONS: Record<VisualStyle, StyleDefinition> = {
     negativePrompt:
       'bright white background, photorealistic, blurry, colorful cartoon, watermark, distorted letters, hand-drawn scribbles',
     defaultMarkerColor: '#0EA5E9',
+    palette: ['#0A1E34', '#1E3A5F', '#0EA5E9', '#7DD3FC', '#F8FAFC'],
+    backgroundNote: 'Prussian navy orthographic grid',
   },
   Isometric: {
     id: 'Isometric',
@@ -75,7 +95,187 @@ export const STYLE_DEFINITIONS: Record<VisualStyle, StyleDefinition> = {
     negativePrompt:
       'perspective distortion, blurry, watermark, garbled text, dark muddy shadows, organic clutter, low contrast',
     defaultMarkerColor: '#2563EB',
+    palette: ['#F4F7FB', '#1E3A8A', '#2563EB', '#94A3B8', '#E2E8F0'],
+    backgroundNote: 'Light cool gray-blue drafting field',
   },
+};
+
+export const TECHNICAL_PROMPT_TEMPLATES: TechnicalPromptTemplate[] = [
+  {
+    id: 'software-architecture',
+    domain: 'Software Architecture',
+    label: 'Microservices & Event Bus',
+    recommendedStyle: 'Isometric',
+    defaultAudience: 'Technical Documentation',
+    subjectHint: 'API gateway, auth service, order service, message broker, and service databases',
+    promptTemplate:
+      'Modular software architecture diagram illustrating an API gateway routing traffic to decoupled microservices connected through an asynchronous event bus and isolated data stores',
+  },
+  {
+    id: 'system-design',
+    domain: 'System Design',
+    label: 'High-Availability Distributed System',
+    recommendedStyle: 'Professional 3D',
+    defaultAudience: 'Technical Documentation',
+    subjectHint: 'CDN edge cache, multi-region load balancer, stateless app tier, Redis cache, primary-replica DB',
+    promptTemplate:
+      'High-availability distributed system design illustration showing global edge caching, active-active load balancing, stateless compute clusters, in-memory cache layer, and replicated storage',
+  },
+  {
+    id: 'workflow-diagram',
+    domain: 'Workflow Diagram',
+    label: 'CI/CD Deployment Pipeline',
+    recommendedStyle: 'Flat Vector',
+    defaultAudience: 'Developer Tutorial',
+    subjectHint: 'source repository, automated build runner, test suite, container registry, production cluster',
+    promptTemplate:
+      'Clean left-to-right CI/CD engineering workflow diagram depicting source commit, automated build and security scanning stages, artifact registry, and staged production rollout',
+  },
+  {
+    id: 'database-architecture',
+    domain: 'Database Architecture',
+    label: 'Relational DBMS & Sharded Storage',
+    recommendedStyle: 'Blueprint',
+    defaultAudience: 'Technical Documentation',
+    subjectHint: 'SQL parser, cost-based query optimizer, B-Tree index engine, write-ahead log, storage partitions',
+    promptTemplate:
+      'Detailed database architecture diagram showing connection pooling, SQL query planner, B-Tree index hierarchy, write-ahead log buffer, and partitioned persistent storage nodes',
+  },
+  {
+    id: 'api-communication',
+    domain: 'API Communication',
+    label: 'REST & Webhook Request Lifecycle',
+    recommendedStyle: 'Flat Vector',
+    defaultAudience: 'Developer Tutorial',
+    subjectHint: 'web/mobile client, TLS reverse proxy, OAuth2 token validator, REST controller, webhook worker',
+    promptTemplate:
+      'Structured API communication diagram showing client applications sending HTTPS requests through an authentication gateway to backend REST endpoints with asynchronous webhook callbacks',
+  },
+  {
+    id: 'network-architecture',
+    domain: 'Network Architecture',
+    label: 'Zero-Trust VPC & Firewall Topology',
+    recommendedStyle: 'Blueprint',
+    defaultAudience: 'Technical Documentation',
+    subjectHint: 'internet firewall, DMZ bastion subnet, internal router, private compute VLAN, encrypted tunnel',
+    promptTemplate:
+      'Enterprise network architecture topology showing edge firewall inspection, segmented DMZ and private VPC subnets, internal routing switches, and encrypted site-to-site gateway',
+  },
+  {
+    id: 'cloud-computing',
+    domain: 'Cloud Computing',
+    label: 'Multi-AZ Cloud Infrastructure',
+    recommendedStyle: 'Professional 3D',
+    defaultAudience: 'Technical Documentation',
+    subjectHint: 'edge ingress, Kubernetes control plane, auto-scaling worker pools, object storage, observability hub',
+    promptTemplate:
+      'Cloud computing architecture illustration showing multi-availability-zone container orchestration, auto-scaling compute clusters, managed object storage, and centralized telemetry monitoring',
+  },
+  {
+    id: 'ai-ml-workflow',
+    domain: 'AI/ML Workflow',
+    label: 'LLM & RAG Inference Pipeline',
+    recommendedStyle: 'Isometric',
+    defaultAudience: 'Technical Documentation',
+    subjectHint: 'document ingestion, embedding encoder, vector database, retriever ranker, foundation model inference',
+    promptTemplate:
+      'AI/ML retrieval-augmented generation workflow illustration showing document chunking, vector embedding encoder, vector index database, semantic retriever, and model inference node',
+  },
+  {
+    id: 'developer-tutorial',
+    domain: 'Developer Tutorial',
+    label: 'Full-Stack State & Data Flow',
+    recommendedStyle: 'Flat Vector',
+    defaultAudience: 'Developer Tutorial',
+    subjectHint: 'browser UI components, client cache, API endpoint layer, validation middleware, persistent store',
+    promptTemplate:
+      'Step-by-step developer tutorial visual showing frontend UI state transitions, client fetch layer, server API validation middleware, and database persistence flow',
+  },
+  {
+    id: 'product-marketing',
+    domain: 'Product & Marketing',
+    label: 'Developer Platform Hero Graphic',
+    recommendedStyle: 'Professional 3D',
+    defaultAudience: 'Product & Marketing',
+    subjectHint: 'central platform core, glowing SDK connectors, cloud integrations, telemetry dashboard cards',
+    promptTemplate:
+      'Sleek product marketing technical hero illustration showcasing a modular developer cloud platform hub radiating clean precision conduits to integrated APIs, analytics, and deployment nodes',
+  },
+];
+
+export const AUDIENCE_MODIFIERS: Record<TargetAudience, string> = {
+  'Technical Documentation':
+    'structured engineering reference layout, balanced orthogonal spacing, clear component separation for technical manuals',
+  'Developer Tutorial':
+    'clear step-by-step left-to-right visual flow, unmistakable directional arrows, approachable educational clarity',
+  'Product & Marketing':
+    'polished editorial hero composition, refined visual depth, cohesive brand-ready presentation suitable for product landing pages',
+};
+
+export interface QualityCriterionMeta {
+  key: QualityCriterionKey;
+  label: string;
+  description: string;
+}
+
+export const QUALITY_CRITERIA: QualityCriterionMeta[] = [
+  {
+    key: 'promptAlignment',
+    label: 'Prompt Alignment',
+    description: 'Matches the requested architecture, components, and flow',
+  },
+  {
+    key: 'visualQuality',
+    label: 'Visual Quality',
+    description: 'Crisp geometry, clean edges, minimal visual artifacts',
+  },
+  {
+    key: 'technicalRelevance',
+    label: 'Technical Relevance',
+    description: 'Accurately reflects plausible engineering structure',
+  },
+  {
+    key: 'clarity',
+    label: 'Clarity',
+    description: 'Easy to understand at a glance without visual clutter',
+  },
+  {
+    key: 'composition',
+    label: 'Composition',
+    description: 'Balanced spacing, alignment, and logical visual hierarchy',
+  },
+  {
+    key: 'styleConsistency',
+    label: 'Style Consistency',
+    description: 'Adheres to the selected visual style and color palette',
+  },
+  {
+    key: 'readability',
+    label: 'Readability',
+    description: 'Clean background with strong contrast for markers and legend',
+  },
+  {
+    key: 'documentationSuitability',
+    label: 'Documentation Suitability',
+    description: 'Ready for READMEs, architecture specs, or API docs',
+  },
+  {
+    key: 'marketingSuitability',
+    label: 'Marketing Suitability',
+    description: 'Polished enough for product pages, blogs, or slide decks',
+  },
+];
+
+export const DEFAULT_QUALITY_RATINGS: QualityRatings = {
+  promptAlignment: 4,
+  visualQuality: 4,
+  technicalRelevance: 4,
+  clarity: 4,
+  composition: 4,
+  styleConsistency: 4,
+  readability: 4,
+  documentationSuitability: 4,
+  marketingSuitability: 4,
 };
 
 export const RESOLUTION_OPTIONS = [
@@ -94,14 +294,19 @@ export const MARKER_COLOR_OPTIONS = [
   { label: 'Crimson', value: '#DC2626' },
 ];
 
-export function buildTemplateEnhancedPrompt(rawPrompt: string, style: VisualStyle): {
+export function buildTemplateEnhancedPrompt(
+  rawPrompt: string,
+  style: VisualStyle,
+  audience?: TargetAudience
+): {
   enhancedPrompt: string;
   negativePrompt: string;
 } {
   const def = STYLE_DEFINITIONS[style];
   const cleaned = rawPrompt.trim().replace(/\.+$/, '');
+  const audienceClause = audience ? `, ${AUDIENCE_MODIFIERS[audience]}` : '';
   return {
-    enhancedPrompt: `${cleaned}, ${def.promptTemplate}`,
+    enhancedPrompt: `${cleaned}, ${def.promptTemplate}${audienceClause}`,
     negativePrompt: def.negativePrompt,
   };
 }
@@ -113,7 +318,7 @@ export const SAMPLE_PRESETS: SamplePreset[] = [
     shortTag: 'Professional 3D',
     prompt: 'Create a cloud computing architecture diagram.',
     style: 'Professional 3D',
-    imageUrl: '/src/assets/images/sample_cloud_architecture_1795190848104.jpg',
+    imageUrl: sampleCloudArchitectureImg,
     title: 'Cloud Computing Reference Architecture',
     subtitle: 'Ingress Gateway, Load Balancing, Stateless Compute & Replicated Storage',
     seed: 4219,
@@ -158,7 +363,7 @@ export const SAMPLE_PRESETS: SamplePreset[] = [
     shortTag: 'Isometric',
     prompt: 'Generate a neural network architecture illustration.',
     style: 'Isometric',
-    imageUrl: '/src/assets/images/sample_neural_network_1795190847354.jpg',
+    imageUrl: sampleNeuralNetworkImg,
     title: 'Multi-Layer Feedforward Neural Network',
     subtitle: 'Normalized Input Features Through Dense Hidden Representations to Output Logits',
     seed: 7814,
@@ -203,7 +408,7 @@ export const SAMPLE_PRESETS: SamplePreset[] = [
     shortTag: 'Flat Vector',
     prompt: 'Show how a client-server application works.',
     style: 'Flat Vector',
-    imageUrl: '/src/assets/images/sample_client_server_1795190847619.jpg',
+    imageUrl: sampleClientServerImg,
     title: 'Client-Server Request Lifecycle',
     subtitle: 'Web & Mobile Clients Communicating Through a Protected API Gateway',
     seed: 3042,
@@ -248,7 +453,7 @@ export const SAMPLE_PRESETS: SamplePreset[] = [
     shortTag: 'Blueprint',
     prompt: 'Create a database management system illustration.',
     style: 'Blueprint',
-    imageUrl: '/src/assets/images/sample_database_system_1795190850468.jpg',
+    imageUrl: sampleDatabaseSystemImg,
     title: 'Relational DBMS Internal Architecture',
     subtitle: 'Query Processing Pipeline, B-Tree Indexing, and Disk Storage Subsystem',
     seed: 9105,

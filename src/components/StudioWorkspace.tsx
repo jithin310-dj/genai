@@ -1,15 +1,18 @@
 import {
   AlertCircle,
   ArrowRightLeft,
+  BookmarkPlus,
   Check,
   ChevronDown,
   ChevronUp,
+  Columns2,
   Copy,
   Crosshair,
   Download,
   History,
   ImagePlus,
   Info,
+  Layers,
   Loader2,
   Plus,
   RefreshCw,
@@ -26,8 +29,10 @@ import {
   RESOLUTION_OPTIONS,
   SAMPLE_PRESETS,
   STYLE_DEFINITIONS,
+  TECHNICAL_PROMPT_TEMPLATES,
 } from '../data/presets';
 import type {
+  BatchVariation,
   ComponentMarker,
   GenerationSettings,
   HfModelOption,
@@ -35,7 +40,10 @@ import type {
   LabelingConfig,
   ProviderErrorState,
   ProvidersHealth,
+  QualityEvaluation,
   RecentGenerationItem,
+  SavedStyleConfig,
+  TargetAudience,
   VisualStyle,
 } from '../types/project';
 import {
@@ -44,6 +52,7 @@ import {
   renderLabeledIllustration,
   validateCoordinates,
 } from '../utils/labeler';
+import { QualityEvaluationPanel } from './QualityEvaluationPanel';
 
 interface StudioWorkspaceProps {
   prompt: string;
@@ -56,7 +65,7 @@ interface StudioWorkspaceProps {
   setSettings: (next: GenerationSettings) => void;
   hfModels: HfModelOption[];
   providersHealth: ProvidersHealth | null;
-  onRefreshHealth: () => void;
+  onRefreshHealth: (force?: boolean) => void;
   originalImageUrl: string;
   setOriginalImageUrl: (url: string) => void;
   labeledImageUrl: string;
@@ -71,8 +80,18 @@ interface StudioWorkspaceProps {
   onSaveToOutputs: (payload: {
     originalDataUrl: string;
     labeledDataUrl: string;
-  }) => Promise<void>;
+    seedOverride?: number;
+    titleOverride?: string;
+    componentsOverride?: ComponentMarker[];
+  }) => Promise<string | null>;
   onDownloadPng: () => void;
+  evaluation: QualityEvaluation;
+  setEvaluation: (next: QualityEvaluation) => void;
+  activeSavedOutputId: string | null;
+  onPersistEvaluation: (evaluation: QualityEvaluation) => Promise<boolean>;
+  savedStyleConfigs: SavedStyleConfig[];
+  onSaveStyleConfig: (config: Omit<SavedStyleConfig, 'id'>) => void;
+  onDeleteStyleConfig: (id: string) => void;
 }
 
 const STYLES_LIST: VisualStyle[] = [
@@ -325,9 +344,28 @@ export function StudioWorkspace({
   onClearRecentHistory,
   onSaveToOutputs,
   onDownloadPng,
+  evaluation,
+  setEvaluation,
+  activeSavedOutputId,
+  onPersistEvaluation,
+  savedStyleConfigs,
+  onSaveStyleConfig,
+  onDeleteStyleConfig,
 }: StudioWorkspaceProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showPromptBuilder, setShowPromptBuilder] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState(
+    TECHNICAL_PROMPT_TEMPLATES[0].id
+  );
+  const [builderAudience, setBuilderAudience] = useState<TargetAudience>(
+    'Technical Documentation'
+  );
+  const [builderComponents, setBuilderComponents] = useState('');
+  const [styleConfigName, setStyleConfigName] = useState('');
   const [autoFallback, setAutoFallback] = useState(true);
+  const [batchVariations, setBatchVariations] = useState<BatchVariation[]>([]);
+  const [activeVariationId, setActiveVariationId] = useState<string | null>(null);
+  const [compareBatchMode, setCompareBatchMode] = useState(false);
   const [activeMarkerId, setActiveMarkerId] = useState<string | null>(
     components[0]?.id ?? null
   );
@@ -568,24 +606,34 @@ export function StudioWorkspace({
   };
 
   const executeSingleEngineAttempt = async (
-    engine: ImageEngine
+    engine: ImageEngine,
+    seedToUse: number
   ): Promise<
-    | { ok: true; engine: 'huggingface'; data: Record<string, unknown> }
-    | { ok: true; engine: 'gemini'; data: Record<string, unknown> }
+    | { ok: true; engine: 'huggingface'; data: Record<string, unknown>; seed: number }
+    | { ok: true; engine: 'gemini'; data: Record<string, unknown>; seed: number }
     | { ok: false; error: ProviderErrorState }
   > => {
     try {
+      const styleEnhanced =
+        enhancedPrompt.trim() ||
+        buildTemplateEnhancedPrompt(prompt, settings.style, builderAudience).enhancedPrompt;
+
       if (engine === 'huggingface') {
+        const hfPrompt = settings.applyStyleToHf
+          ? styleEnhanced.slice(0, 990)
+          : prompt.trim();
         const { ok, data } = await fetchJsonWithTimeout('/api/generate-image', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            prompt: prompt.trim(),
+            prompt: hfPrompt,
             negativePrompt: negativePrompt.trim() || undefined,
             model: settings.hfModel,
             width: settings.width,
             height: settings.height,
-            seed: settings.seed,
+            steps: settings.steps,
+            guidanceScale: settings.guidanceScale,
+            seed: seedToUse,
             maxAttempts: 1,
           }),
         });
@@ -599,24 +647,20 @@ export function StudioWorkspace({
             ),
           };
         }
-        return { ok: true, engine: 'huggingface', data };
+        return { ok: true, engine: 'huggingface', data, seed: seedToUse };
       } else {
-        const activeEnhanced =
-          enhancedPrompt.trim() ||
-          buildTemplateEnhancedPrompt(prompt, settings.style).enhancedPrompt;
-
         const { ok, data } = await fetchJsonWithTimeout('/api/generate-diagram', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompt: prompt.trim(),
-            enhancedPrompt: activeEnhanced,
+            enhancedPrompt: styleEnhanced,
             style: settings.style,
             width: settings.width,
             height: settings.height,
             steps: settings.steps,
             guidanceScale: settings.guidanceScale,
-            seed: settings.seed,
+            seed: seedToUse,
             maxAttempts: 1,
           }),
         });
@@ -630,7 +674,7 @@ export function StudioWorkspace({
             ),
           };
         }
-        return { ok: true, engine: 'gemini', data };
+        return { ok: true, engine: 'gemini', data, seed: seedToUse };
       }
     } catch (err) {
       const isTimeout = err instanceof DOMException && err.name === 'AbortError';
@@ -651,10 +695,12 @@ export function StudioWorkspace({
 
   const runEngineWithRetries = async (
     engine: ImageEngine,
-    isFallbackPhase: boolean
+    isFallbackPhase: boolean,
+    seedToUse: number,
+    batchPrefix = ''
   ): Promise<
-    | { ok: true; engine: 'huggingface'; data: Record<string, unknown> }
-    | { ok: true; engine: 'gemini'; data: Record<string, unknown> }
+    | { ok: true; engine: 'huggingface'; data: Record<string, unknown>; seed: number }
+    | { ok: true; engine: 'gemini'; data: Record<string, unknown>; seed: number }
     | { ok: false; error: ProviderErrorState }
   > => {
     const label = engineButtonLabel(engine);
@@ -664,16 +710,16 @@ export function StudioWorkspace({
       if (attempt === 1) {
         setLoadingStatus(
           isFallbackPhase
-            ? `Switching to ${label}...`
-            : `Generating with ${label}...`
+            ? `${batchPrefix}Switching to ${label}...`
+            : `${batchPrefix}Generating with ${label}...`
         );
       } else {
         setLoadingStatus(
-          `${providerDisplayName(engine)} is busy. Retrying (${attempt}/${MAX_GENERATION_ATTEMPTS})...`
+          `${batchPrefix}${providerDisplayName(engine)} is busy. Retrying (${attempt}/${MAX_GENERATION_ATTEMPTS})...`
         );
       }
 
-      const result = await executeSingleEngineAttempt(engine);
+      const result = await executeSingleEngineAttempt(engine, seedToUse);
       if (result.ok) {
         return result;
       }
@@ -685,7 +731,7 @@ export function StudioWorkspace({
 
       const nextAttempt = attempt + 1;
       setLoadingStatus(
-        `${result.error.providerLabel} is busy. Retrying (${nextAttempt}/${MAX_GENERATION_ATTEMPTS})...`
+        `${batchPrefix}${result.error.providerLabel} is busy. Retrying (${nextAttempt}/${MAX_GENERATION_ATTEMPTS})...`
       );
       await sleep(computeRetryDelayMs(attempt, result.error.retryAfterSeconds));
     }
@@ -702,29 +748,20 @@ export function StudioWorkspace({
     };
   };
 
-  const applyGenerationSuccess = async (
+  const materializeVariation = async (
     result:
-      | { ok: true; engine: 'huggingface'; data: Record<string, unknown> }
-      | { ok: true; engine: 'gemini'; data: Record<string, unknown> }
-  ) => {
+      | { ok: true; engine: 'huggingface'; data: Record<string, unknown>; seed: number }
+      | { ok: true; engine: 'gemini'; data: Record<string, unknown>; seed: number }
+  ): Promise<BatchVariation> => {
     if (result.engine === 'huggingface') {
       const data = result.data;
       const generatedUrl = String(data.imageUrl);
       const outWidth = Number(data.width) || settings.width;
       const outHeight = Number(data.height) || settings.height;
       const outModel = typeof data.model === 'string' ? data.model : settings.hfModel;
-
-      setOriginalImageUrl(generatedUrl);
-
-      const nextLabelConfig: LabelingConfig = {
-        ...labelingConfig,
-        title:
-          prompt.trim().length > 52
-            ? `${prompt.trim().slice(0, 52)}...`
-            : prompt.trim(),
-        subtitle: `${activeHfModelMeta.label} · ${outWidth}×${outHeight}`,
-      };
-      setLabelingConfig(nextLabelConfig);
+      const nextTitle =
+        prompt.trim().length > 52 ? `${prompt.trim().slice(0, 52)}...` : prompt.trim();
+      const nextSubtitle = `${activeHfModelMeta.label} · ${outWidth}×${outHeight} · Seed ${result.seed}`;
 
       const thumbUrl = await createHistoryThumbnail(generatedUrl);
       onAddRecentHistory({
@@ -740,25 +777,17 @@ export function StudioWorkspace({
         createdAt: new Date().toISOString(),
       });
 
-      const renderedComposite = await renderLabeledIllustration(
-        generatedUrl,
-        components,
-        nextLabelConfig,
-        settings.style
-      );
-      setLabeledImageUrl(renderedComposite);
-
-      try {
-        const origPng = await imageUrlToPngDataUrl(generatedUrl);
-        await onSaveToOutputs({
-          originalDataUrl: origPng,
-          labeledDataUrl: renderedComposite,
-        });
-        setSaveNotice('Generated & saved to outputs/');
-        window.setTimeout(() => setSaveNotice(null), 3500);
-      } catch {
-        // Non-blocking: display generated image even if disk archive fails
-      }
+      return {
+        id: `var_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        imageUrl: generatedUrl,
+        seed: result.seed,
+        engine: 'huggingface',
+        model: outModel,
+        width: outWidth,
+        height: outHeight,
+        title: nextTitle,
+        subtitle: nextSubtitle,
+      };
     } else {
       const data = result.data;
       const rasterizedPng = await rasterizeSvgToPng(
@@ -766,21 +795,13 @@ export function StudioWorkspace({
         settings.width,
         settings.height
       );
-      setOriginalImageUrl(rasterizedPng);
-
       const nextTitle =
         typeof data.title === 'string' && data.title.trim()
           ? data.title
           : labelingConfig.title;
-      const nextLabelConfig: LabelingConfig = {
-        ...labelingConfig,
-        title: nextTitle,
-        subtitle: `${settings.style} · ${settings.width}×${settings.height} · Seed ${settings.seed}`,
-        markerColor: STYLE_DEFINITIONS[settings.style].defaultMarkerColor,
-      };
-      setLabelingConfig(nextLabelConfig);
+      const nextSubtitle = `${settings.style} · ${settings.width}×${settings.height} · Seed ${result.seed}`;
 
-      let nextComponents = components;
+      let nextComponents: ComponentMarker[] | undefined;
       if (Array.isArray(data.components) && data.components.length > 0) {
         nextComponents = data.components.map(
           (
@@ -794,8 +815,6 @@ export function StudioWorkspace({
             y: Number(item.y),
           })
         );
-        setComponents(nextComponents);
-        setActiveMarkerId(nextComponents[0]?.id ?? null);
       }
 
       const thumbUrl = await createHistoryThumbnail(rasterizedPng);
@@ -812,18 +831,65 @@ export function StudioWorkspace({
         createdAt: new Date().toISOString(),
       });
 
-      const renderedComposite = await renderLabeledIllustration(
-        rasterizedPng,
-        nextComponents,
-        nextLabelConfig,
-        settings.style
-      );
-      setLabeledImageUrl(renderedComposite);
+      return {
+        id: `var_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        imageUrl: rasterizedPng,
+        seed: result.seed,
+        engine: 'gemini',
+        model: 'Gemini SVG Diagram',
+        width: settings.width,
+        height: settings.height,
+        title: nextTitle,
+        subtitle: nextSubtitle,
+        components: nextComponents,
+      };
+    }
+  };
 
+  const selectVariationToStage = async (
+    variation: BatchVariation,
+    archiveToDisk = false
+  ) => {
+    setActiveVariationId(variation.id);
+    setOriginalImageUrl(variation.imageUrl);
+
+    const activeComps =
+      variation.components && variation.components.length > 0
+        ? variation.components
+        : components;
+    if (variation.components && variation.components.length > 0) {
+      setComponents(variation.components);
+      setActiveMarkerId(variation.components[0]?.id ?? null);
+    }
+
+    const nextLabelConfig: LabelingConfig = {
+      ...labelingConfig,
+      title: variation.title,
+      subtitle: variation.subtitle,
+      markerColor: STYLE_DEFINITIONS[settings.style].defaultMarkerColor,
+    };
+    setLabelingConfig(nextLabelConfig);
+
+    const renderedComposite = await renderLabeledIllustration(
+      variation.imageUrl,
+      activeComps,
+      nextLabelConfig,
+      settings.style
+    );
+    setLabeledImageUrl(renderedComposite);
+
+    if (archiveToDisk) {
       try {
+        const origPng =
+          variation.imageUrl.startsWith('data:image/png')
+            ? variation.imageUrl
+            : await imageUrlToPngDataUrl(variation.imageUrl);
         await onSaveToOutputs({
-          originalDataUrl: rasterizedPng,
+          originalDataUrl: origPng,
           labeledDataUrl: renderedComposite,
+          seedOverride: variation.seed,
+          titleOverride: variation.title,
+          componentsOverride: activeComps,
         });
         setSaveNotice('Generated & saved to outputs/');
         window.setTimeout(() => setSaveNotice(null), 3500);
@@ -846,64 +912,186 @@ export function StudioWorkspace({
       return;
     }
 
+    const totalCount = Math.min(4, Math.max(1, Number(settings.quantity) || 1));
+
     inFlightRef.current = true;
     setCooldownSeconds(GENERATE_COOLDOWN_SECONDS);
     setToastError(null);
     setFallbackNotice(null);
+    setCompareBatchMode(false);
     setIsGenerating(true);
 
-    try {
-      const primaryResult = await runEngineWithRetries(primaryEngine, false);
+    const collectedVariations: BatchVariation[] = [];
+    let resolvedEngine: ImageEngine = primaryEngine;
+    let fallbackBannerToShow: string | null = null;
 
-      if (primaryResult.ok) {
-        await applyGenerationSuccess(primaryResult);
-        return;
+    try {
+      // If HF quota is already known-exhausted and auto-fallback is ON, route straight to Gemini SVG
+      if (
+        primaryEngine === 'huggingface' &&
+        !overrideEngine &&
+        autoFallback &&
+        providersHealth?.huggingface.quotaExhausted
+      ) {
+        resolvedEngine = 'gemini';
+        fallbackBannerToShow =
+          'Hugging Face quota reached — generated with Gemini SVG instead.';
       }
 
-      const primaryErr = primaryResult.error;
-      const fallbackEngine: ImageEngine =
-        primaryEngine === 'huggingface' ? 'gemini' : 'huggingface';
+      for (let i = 0; i < totalCount; i += 1) {
+        const seedForItem = settings.seed + i;
+        const batchPrefix = totalCount > 1 ? `[${i + 1}/${totalCount}] ` : '';
 
-      // Automatic cross-engine fallback if enabled and the error warrants switching
-      if (autoFallback && shouldTriggerAutoFallback(primaryErr)) {
-        const fallbackResult = await runEngineWithRetries(fallbackEngine, true);
+        let itemResult = await runEngineWithRetries(
+          resolvedEngine,
+          resolvedEngine !== primaryEngine,
+          seedForItem,
+          batchPrefix
+        );
 
-        if (fallbackResult.ok) {
-          await applyGenerationSuccess(fallbackResult);
-          setFallbackNotice(
-            buildFallbackSuccessBanner(primaryErr, fallbackEngine)
-          );
-          onRefreshHealth();
-          return;
+        if (!itemResult.ok) {
+          const primaryErr = itemResult.error;
+          const fallbackEngine: ImageEngine =
+            resolvedEngine === 'huggingface' ? 'gemini' : 'huggingface';
+
+          if (
+            resolvedEngine === primaryEngine &&
+            autoFallback &&
+            shouldTriggerAutoFallback(primaryErr)
+          ) {
+            const fallbackResult = await runEngineWithRetries(
+              fallbackEngine,
+              true,
+              seedForItem,
+              batchPrefix
+            );
+
+            if (fallbackResult.ok) {
+              resolvedEngine = fallbackEngine;
+              fallbackBannerToShow = buildFallbackSuccessBanner(
+                primaryErr,
+                fallbackEngine
+              );
+              itemResult = fallbackResult;
+            } else {
+              if (collectedVariations.length === 0) {
+                setToastError({
+                  provider: primaryErr.provider,
+                  providerLabel: `${primaryErr.providerLabel} & ${fallbackResult.error.providerLabel}`,
+                  code: primaryErr.code,
+                  userMessage: `${primaryErr.userMessage} Fallback to ${engineButtonLabel(fallbackEngine)} also failed: ${fallbackResult.error.userMessage}`,
+                  retryable: primaryErr.retryable || fallbackResult.error.retryable,
+                });
+              }
+              onRefreshHealth();
+              break;
+            }
+          } else {
+            if (collectedVariations.length === 0) {
+              setToastError(primaryErr);
+            }
+            onRefreshHealth();
+            break;
+          }
         }
 
-        // Both engines failed — report clearly without hiding which provider failed
-        setToastError({
-          provider: primaryErr.provider,
-          providerLabel: `${primaryErr.providerLabel} & ${fallbackResult.error.providerLabel}`,
-          code: primaryErr.code,
-          userMessage: `${primaryErr.userMessage} Fallback to ${engineButtonLabel(fallbackEngine)} also failed: ${fallbackResult.error.userMessage}`,
-          retryable: primaryErr.retryable || fallbackResult.error.retryable,
-        });
-        onRefreshHealth();
-        return;
+        if (itemResult.ok) {
+          const variation = await materializeVariation(itemResult);
+          collectedVariations.push(variation);
+          // Show the first variation immediately as soon as it lands
+          if (collectedVariations.length === 1) {
+            await selectVariationToStage(variation, true);
+          }
+        }
       }
 
-      setToastError(primaryErr);
-      onRefreshHealth();
+      if (collectedVariations.length > 0) {
+        setBatchVariations(collectedVariations);
+        if (fallbackBannerToShow) {
+          setFallbackNotice(fallbackBannerToShow);
+          onRefreshHealth();
+        }
+      }
     } catch {
-      setToastError(
-        makeLocalError(
-          primaryEngine,
-          `${providerDisplayName(primaryEngine)} encountered an unexpected error. Please try again.`,
-          'PROVIDER_ERROR'
-        )
-      );
+      if (collectedVariations.length === 0) {
+        setToastError(
+          makeLocalError(
+            primaryEngine,
+            `${providerDisplayName(primaryEngine)} encountered an unexpected error. Please try again.`,
+            'PROVIDER_ERROR'
+          )
+        );
+      }
     } finally {
       inFlightRef.current = false;
       setIsGenerating(false);
       setLoadingStatus('');
     }
+  };
+
+  const handleApplyPromptTemplate = () => {
+    const tpl =
+      TECHNICAL_PROMPT_TEMPLATES.find((t) => t.id === selectedTemplateId) ??
+      TECHNICAL_PROMPT_TEMPLATES[0];
+    const focusClause = builderComponents.trim()
+      ? ` featuring ${builderComponents.trim()}`
+      : '';
+    const composedPrompt = `${tpl.promptTemplate}${focusClause}.`;
+    setPrompt(composedPrompt);
+
+    const nextStyle = tpl.recommendedStyle;
+    const { enhancedPrompt: ep, negativePrompt: np } = buildTemplateEnhancedPrompt(
+      composedPrompt,
+      nextStyle,
+      builderAudience
+    );
+    setEnhancedPrompt(ep);
+    setNegativePrompt(np);
+    setSettings({ ...settings, style: nextStyle });
+    setLabelingConfig({
+      ...labelingConfig,
+      title: `${tpl.domain}: ${tpl.label}`,
+      subtitle: `${builderAudience} · ${nextStyle}`,
+      markerColor: STYLE_DEFINITIONS[nextStyle].defaultMarkerColor,
+    });
+    setToastError(null);
+  };
+
+  const handleSaveCurrentStyleConfig = () => {
+    const name = styleConfigName.trim() || `${settings.style} (${settings.width}×${settings.height})`;
+    onSaveStyleConfig({
+      name,
+      style: settings.style,
+      markerColor: labelingConfig.markerColor,
+      steps: settings.steps,
+      guidanceScale: settings.guidanceScale,
+      width: settings.width,
+      height: settings.height,
+      negativePrompt: negativePrompt.trim(),
+    });
+    setStyleConfigName('');
+  };
+
+  const handleApplySavedStyleConfig = (cfg: SavedStyleConfig) => {
+    setSettings({
+      ...settings,
+      style: cfg.style,
+      steps: cfg.steps,
+      guidanceScale: cfg.guidanceScale,
+      width: cfg.width,
+      height: cfg.height,
+    });
+    setNegativePrompt(cfg.negativePrompt);
+    const { enhancedPrompt: ep } = buildTemplateEnhancedPrompt(
+      prompt || 'Technical system architecture',
+      cfg.style,
+      builderAudience
+    );
+    setEnhancedPrompt(ep);
+    setLabelingConfig({
+      ...labelingConfig,
+      markerColor: cfg.markerColor,
+    });
   };
 
   const handleTryOtherEngine = () => {
@@ -1086,7 +1274,7 @@ export function StudioWorkspace({
               </p>
               <button
                 type="button"
-                onClick={onRefreshHealth}
+                onClick={() => onRefreshHealth(true)}
                 title="Refresh engine availability"
                 aria-label="Refresh engine availability"
                 className="inline-flex cursor-pointer items-center gap-1 text-[11px] font-medium text-slate-500 transition-colors hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
@@ -1237,6 +1425,99 @@ export function StudioWorkspace({
                 Template Rules
               </button>
             </div>
+
+            {/* Structured Technical Prompt Templates Disclosure */}
+            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/70 p-2.5 dark:border-slate-800 dark:bg-slate-950/70">
+              <button
+                type="button"
+                onClick={() => setShowPromptBuilder((v) => !v)}
+                className="flex w-full cursor-pointer items-center justify-between text-xs font-semibold text-slate-700 hover:text-slate-950 dark:text-slate-300 dark:hover:text-white"
+              >
+                <span>Structured Technical Prompt Builder (10 Domains)</span>
+                {showPromptBuilder ? (
+                  <ChevronUp className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                ) : (
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                )}
+              </button>
+
+              {showPromptBuilder && (
+                <div className="mt-2.5 space-y-2.5">
+                  <div>
+                    <label
+                      htmlFor="domain-template-select"
+                      className="block text-[11px] font-medium text-slate-600 dark:text-slate-400"
+                    >
+                      Technical Domain Template
+                    </label>
+                    <select
+                      id="domain-template-select"
+                      value={selectedTemplateId}
+                      onChange={(e) => {
+                        const nextId = e.target.value;
+                        setSelectedTemplateId(nextId);
+                        const tpl = TECHNICAL_PROMPT_TEMPLATES.find((t) => t.id === nextId);
+                        if (tpl) setBuilderAudience(tpl.defaultAudience);
+                      }}
+                      className="mt-1 h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                    >
+                      {TECHNICAL_PROMPT_TEMPLATES.map((tpl) => (
+                        <option key={tpl.id} value={tpl.id}>
+                          {tpl.domain} — {tpl.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="audience-select"
+                      className="block text-[11px] font-medium text-slate-600 dark:text-slate-400"
+                    >
+                      Target Use Case
+                    </label>
+                    <select
+                      id="audience-select"
+                      value={builderAudience}
+                      onChange={(e) => setBuilderAudience(e.target.value as TargetAudience)}
+                      className="mt-1 h-8 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-900 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                    >
+                      <option value="Technical Documentation">Technical Documentation</option>
+                      <option value="Developer Tutorial">Developer Tutorial</option>
+                      <option value="Product & Marketing">Product &amp; Marketing</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="builder-components-input"
+                      className="block text-[11px] font-medium text-slate-600 dark:text-slate-400"
+                    >
+                      Key Components to Highlight (optional)
+                    </label>
+                    <input
+                      id="builder-components-input"
+                      type="text"
+                      value={builderComponents}
+                      onChange={(e) => setBuilderComponents(e.target.value)}
+                      placeholder={
+                        TECHNICAL_PROMPT_TEMPLATES.find((t) => t.id === selectedTemplateId)
+                          ?.subjectHint
+                      }
+                      className="mt-1 h-8 w-full rounded-md border border-slate-200 bg-white px-2.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
+                    />
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleApplyPromptTemplate}
+                    className="w-full cursor-pointer rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-slate-800 dark:bg-blue-600 dark:hover:bg-blue-500"
+                  >
+                    Apply Structured Template
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Primary Generate Button (3s cooldown + in-flight lock + live retry status) */}
@@ -1260,48 +1541,84 @@ export function StudioWorkspace({
               ) : cooldownSeconds > 0 ? (
                 <span>Wait {cooldownSeconds}s...</span>
               ) : (
-                <span>Generate</span>
+                <span>
+                  {settings.quantity > 1
+                    ? `Generate ${settings.quantity} Variations`
+                    : 'Generate'}
+                </span>
               )}
             </button>
           </div>
 
           <hr className="my-5 border-slate-100 dark:border-slate-800" />
 
-          {/* Generation Settings: Size, Style, Steps, CFG, Seed */}
+          {/* Generation Settings: Size, Quantity, Style, Palette, Reusable Configs, Steps, CFG, Seed */}
           <div className="space-y-4">
             <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
               Image Settings
             </h2>
 
-            {/* Size Selector */}
-            <div>
-              <label
-                htmlFor="resolution-select"
-                className="block text-xs font-medium text-slate-700 dark:text-slate-300"
-              >
-                Image Size
-              </label>
-              <select
-                id="resolution-select"
-                value={`${settings.width}x${settings.height}`}
-                onChange={(e) => {
-                  const [w, h] = e.target.value.split('x').map(Number);
-                  setSettings({ ...settings, width: w, height: h });
-                }}
-                className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-900 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-600/15 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
-              >
-                {RESOLUTION_OPTIONS.map((opt) => (
-                  <option key={opt.label} value={`${opt.width}x${opt.height}`}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {/* Size & Quantity Row */}
+            <div className="grid grid-cols-[1fr_92px] gap-2.5">
+              <div>
+                <label
+                  htmlFor="resolution-select"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Image Size
+                </label>
+                <select
+                  id="resolution-select"
+                  value={`${settings.width}x${settings.height}`}
+                  onChange={(e) => {
+                    const [w, h] = e.target.value.split('x').map(Number);
+                    setSettings({ ...settings, width: w, height: h });
+                  }}
+                  className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 bg-white px-2.5 text-xs text-slate-900 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-600/15 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                >
+                  {RESOLUTION_OPTIONS.map((opt) => (
+                    <option key={opt.label} value={`${opt.width}x${opt.height}`}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-            {/* Visual Styles */}
+              <div>
+                <label
+                  htmlFor="quantity-select"
+                  className="block text-xs font-medium text-slate-700 dark:text-slate-300"
+                >
+                  Quantity
+                </label>
+                <select
+                  id="quantity-select"
+                  value={settings.quantity}
+                  onChange={(e) =>
+                    setSettings({ ...settings, quantity: Number(e.target.value) || 1 })
+                  }
+                  className="mt-1.5 h-9 w-full rounded-lg border border-slate-200 bg-white px-2.5 font-mono text-xs text-slate-900 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-600/15 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                >
+                  {[1, 2, 3, 4].map((count) => (
+                    <option key={count} value={count}>
+                      {count} {count === 1 ? 'img' : 'imgs'}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {settings.quantity > 1 && (
+              <p className="-mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                Generates {settings.quantity} seed variations ({settings.seed}–
+                {settings.seed + settings.quantity - 1}) for side-by-side comparison. Uses{' '}
+                {settings.quantity}× credits.
+              </p>
+            )}
+
+            {/* Visual Styles + Palette Consistency Swatches */}
             <div>
               <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
-                Documentation Frame &amp; Style
+                Visual Style &amp; Palette
               </p>
               <div className="mt-2 grid grid-cols-2 gap-2">
                 {STYLES_LIST.map((styleName) => {
@@ -1327,6 +1644,90 @@ export function StudioWorkspace({
               <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400">
                 {STYLE_DEFINITIONS[settings.style].summary}
               </p>
+
+              {/* Style Color Palette Swatches */}
+              <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-slate-100 bg-slate-50/80 px-2.5 py-1.5 dark:border-slate-800 dark:bg-slate-950/70">
+                <span className="truncate text-[11px] text-slate-500 dark:text-slate-400">
+                  {STYLE_DEFINITIONS[settings.style].backgroundNote}
+                </span>
+                <div className="flex items-center gap-1 shrink-0" aria-label="Style color palette">
+                  {STYLE_DEFINITIONS[settings.style].palette.map((hex) => (
+                    <span
+                      key={hex}
+                      title={hex}
+                      style={{ backgroundColor: hex }}
+                      className="h-3.5 w-3.5 rounded-sm border border-slate-300/80 dark:border-slate-600"
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {settings.engine === 'huggingface' && (
+                <label className="mt-2 flex cursor-pointer items-center gap-2 text-[11px] text-slate-600 dark:text-slate-400">
+                  <input
+                    type="checkbox"
+                    checked={settings.applyStyleToHf}
+                    onChange={(e) =>
+                      setSettings({ ...settings, applyStyleToHf: e.target.checked })
+                    }
+                    className="h-3.5 w-3.5 rounded border-slate-300 text-blue-700 focus:ring-blue-600 dark:border-slate-600 dark:bg-slate-900"
+                  />
+                  <span>Enforce visual style &amp; clean background in HF prompt</span>
+                </label>
+              )}
+            </div>
+
+            {/* Reusable Style Configurations */}
+            <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-3 dark:border-slate-800 dark:bg-slate-950/50">
+              <p className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                Reusable Style Configurations
+              </p>
+              <div className="mt-2 flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={styleConfigName}
+                  onChange={(e) => setStyleConfigName(e.target.value)}
+                  placeholder="Preset name (e.g. Docs Blueprint)"
+                  className="h-8 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder:text-slate-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveCurrentStyleConfig}
+                  className="inline-flex h-8 cursor-pointer items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-800 hover:bg-slate-50 whitespace-nowrap shrink-0 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700"
+                >
+                  <BookmarkPlus className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Save</span>
+                </button>
+              </div>
+              {savedStyleConfigs.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {savedStyleConfigs.map((cfg) => (
+                    <div
+                      key={cfg.id}
+                      className="flex items-center justify-between gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] dark:border-slate-800 dark:bg-slate-900"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => handleApplySavedStyleConfig(cfg)}
+                        className="min-w-0 flex-1 cursor-pointer truncate text-left font-medium text-slate-800 hover:text-blue-700 dark:text-slate-200 dark:hover:text-blue-400"
+                      >
+                        {cfg.name}{' '}
+                        <span className="font-mono text-[10px] text-slate-400">
+                          · {cfg.style} · {cfg.steps}s
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDeleteStyleConfig(cfg.id)}
+                        aria-label={`Delete style configuration ${cfg.name}`}
+                        className="cursor-pointer rounded p-0.5 text-slate-400 hover:text-red-600 dark:hover:text-red-400"
+                      >
+                        <X className="h-3 w-3" aria-hidden="true" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Advanced Prompt & Parameters Disclosure */}
@@ -1818,6 +2219,75 @@ export function StudioWorkspace({
               )}
             </div>
 
+            {/* Batch Variations Switcher & Inline Side-by-Side Comparison (when Quantity > 1) */}
+            {batchVariations.length > 1 && (
+              <div className="border-t border-slate-200 px-4 py-4 sm:px-5 dark:border-slate-800">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs text-slate-800 dark:text-slate-200">
+                    <Layers className="h-3.5 w-3.5 text-blue-700 dark:text-blue-400" aria-hidden="true" />
+                    <span className="font-semibold">
+                      Batch Variations ({batchVariations.length} generated)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCompareBatchMode((v) => !v)}
+                    className={`inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
+                      compareBatchMode
+                        ? 'border-blue-600 bg-blue-50 text-blue-700 dark:border-blue-500 dark:bg-blue-950/50 dark:text-blue-300'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'
+                    }`}
+                  >
+                    <Columns2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>{compareBatchMode ? 'Hide Side-by-Side' : 'Compare Side-by-Side'}</span>
+                  </button>
+                </div>
+
+                <div
+                  className={`mt-3 grid gap-3 ${
+                    compareBatchMode ? 'sm:grid-cols-2' : 'grid-cols-2 sm:grid-cols-4'
+                  }`}
+                >
+                  {batchVariations.map((variant, idx) => {
+                    const isActive = variant.id === activeVariationId;
+                    return (
+                      <button
+                        key={variant.id}
+                        type="button"
+                        onClick={() => void selectVariationToStage(variant, false)}
+                        className={`flex cursor-pointer flex-col overflow-hidden rounded-lg border text-left transition-colors ${
+                          isActive
+                            ? 'border-blue-600 bg-blue-50/40 ring-1 ring-blue-600/20 dark:border-blue-500 dark:bg-blue-950/30'
+                            : 'border-slate-200 bg-slate-50 hover:border-blue-400 dark:border-slate-700 dark:bg-slate-950'
+                        }`}
+                      >
+                        <div
+                          className={`w-full overflow-hidden bg-white dark:bg-slate-900 ${
+                            compareBatchMode ? 'aspect-[4/3]' : 'aspect-square'
+                          }`}
+                        >
+                          <img
+                            src={variant.imageUrl}
+                            alt={`Variation ${idx + 1} (Seed ${variant.seed})`}
+                            referrerPolicy="no-referrer"
+                            className="h-full w-full object-contain"
+                          />
+                        </div>
+                        <div className="flex items-center justify-between px-2.5 py-1.5 text-[11px]">
+                          <span className="font-semibold text-slate-900 dark:text-slate-100">
+                            Variant #{idx + 1}
+                          </span>
+                          <span className="font-mono text-slate-500 tabular-nums dark:text-slate-400">
+                            Seed {variant.seed}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Recent Generations History Strip (last 8 generations in localStorage) */}
             <div className="border-t border-slate-200 px-4 py-4 sm:px-5 dark:border-slate-800">
               <div className="flex items-center justify-between gap-3">
@@ -2190,6 +2660,18 @@ export function StudioWorkspace({
               </table>
             </div>
           </section>
+
+          {/* Technical Graphic Quality Evaluation Rubric (9 Criteria + Markdown Export) */}
+          <QualityEvaluationPanel
+            title={labelingConfig.title}
+            prompt={prompt}
+            enhancedPrompt={enhancedPrompt}
+            settings={settings}
+            evaluation={evaluation}
+            onChangeEvaluation={setEvaluation}
+            activeSavedOutputId={activeSavedOutputId}
+            onPersistEvaluation={onPersistEvaluation}
+          />
         </div>
       </div>
 

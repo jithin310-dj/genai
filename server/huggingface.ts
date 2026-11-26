@@ -68,6 +68,8 @@ export interface GenerateHfImageRequest {
   model?: unknown;
   width?: unknown;
   height?: unknown;
+  steps?: unknown;
+  guidanceScale?: unknown;
   seed?: unknown;
   maxAttempts?: number;
 }
@@ -134,12 +136,10 @@ export function normalizeHfError(error: unknown, token?: string): ProviderError 
     [token]
   );
   const lower = rawMessage.toLowerCase();
-
-  // Log full upstream details strictly on the server
-  console.info('[Hugging Face upstream]', { status, message: rawMessage });
+  let normalized: ProviderError;
 
   if (isNetworkOrTimeoutError(error)) {
-    return new ProviderError(504, {
+    normalized = new ProviderError(504, {
       provider: 'huggingface',
       providerLabel: 'Hugging Face',
       code: 'TIMEOUT',
@@ -148,9 +148,7 @@ export function normalizeHfError(error: unknown, token?: string): ProviderError 
       retryable: true,
       retryAfterSeconds: 3,
     });
-  }
-
-  if (
+  } else if (
     status === 401 ||
     status === 403 ||
     lower.includes('unauthorized') ||
@@ -159,7 +157,7 @@ export function normalizeHfError(error: unknown, token?: string): ProviderError 
     lower.includes('permissions') ||
     lower.includes('sufficient permissions')
   ) {
-    return new ProviderError(status === 403 ? 403 : 401, {
+    normalized = new ProviderError(status === 403 ? 403 : 401, {
       provider: 'huggingface',
       providerLabel: 'Hugging Face',
       code: 'INVALID_TOKEN',
@@ -167,9 +165,7 @@ export function normalizeHfError(error: unknown, token?: string): ProviderError 
         'Hugging Face token invalid or missing the Inference Providers permission.',
       retryable: false,
     });
-  }
-
-  if (
+  } else if (
     status === 402 ||
     lower.includes('payment required') ||
     lower.includes('credit') ||
@@ -180,7 +176,7 @@ export function normalizeHfError(error: unknown, token?: string): ProviderError 
     // Mark HF quota exhausted for 10 minutes so /api/health reflects accurate availability
     hfQuotaExhaustedUntil = Date.now() + 10 * 60_000;
     cachedHfHealth = null;
-    return new ProviderError(429, {
+    normalized = new ProviderError(429, {
       provider: 'huggingface',
       providerLabel: 'Hugging Face',
       code: 'QUOTA_EXCEEDED',
@@ -188,14 +184,12 @@ export function normalizeHfError(error: unknown, token?: string): ProviderError 
         'Hugging Face free credits used up. Add credits at huggingface.co/settings/billing or switch engine.',
       retryable: false,
     });
-  }
-
-  if (
+  } else if (
     status === 429 ||
     lower.includes('rate limit') ||
     lower.includes('too many requests')
   ) {
-    return new ProviderError(429, {
+    normalized = new ProviderError(429, {
       provider: 'huggingface',
       providerLabel: 'Hugging Face',
       code: 'RATE_LIMITED',
@@ -204,16 +198,14 @@ export function normalizeHfError(error: unknown, token?: string): ProviderError 
       retryable: true,
       retryAfterSeconds: 5,
     });
-  }
-
-  if (
+  } else if (
     status === 503 ||
     lower.includes('currently loading') ||
     lower.includes('model is loading') ||
     lower.includes('estimated_time') ||
     lower.includes('temporarily unavailable')
   ) {
-    return new ProviderError(503, {
+    normalized = new ProviderError(503, {
       provider: 'huggingface',
       providerLabel: 'Hugging Face',
       code: 'MODEL_LOADING',
@@ -222,10 +214,8 @@ export function normalizeHfError(error: unknown, token?: string): ProviderError 
       retryable: true,
       retryAfterSeconds: 5,
     });
-  }
-
-  if (status === 400) {
-    return new ProviderError(400, {
+  } else if (status === 400) {
+    normalized = new ProviderError(400, {
       provider: 'huggingface',
       providerLabel: 'Hugging Face',
       code: 'INVALID_REQUEST',
@@ -233,16 +223,21 @@ export function normalizeHfError(error: unknown, token?: string): ProviderError 
         'Hugging Face rejected this prompt or image size. Try adjusting the prompt or choosing 768×768.',
       retryable: false,
     });
+  } else {
+    normalized = new ProviderError(502, {
+      provider: 'huggingface',
+      providerLabel: 'Hugging Face',
+      code: 'UPSTREAM_ERROR',
+      userMessage:
+        'Hugging Face could not generate the image right now. Please retry or switch engine.',
+      retryable: status >= 500 || status === 0,
+    });
   }
 
-  return new ProviderError(502, {
-    provider: 'huggingface',
-    providerLabel: 'Hugging Face',
-    code: 'UPSTREAM_ERROR',
-    userMessage:
-      'Hugging Face could not generate the image right now. Please retry or switch engine.',
-    retryable: status >= 500 || status === 0,
-  });
+  console.info(
+    `[Hugging Face] upstream status=${status || 'unknown'} code=${normalized.payload.code}`
+  );
+  return normalized;
 }
 
 function validateDimension(value: unknown, fallback: number, name: string): number {
@@ -359,9 +354,23 @@ export async function generateHuggingFaceImage(
     });
   }
 
-  // 4. Validate dimensions (default 768x768 for credit friendliness)
+  // 4. Validate dimensions & optional diffusion hyperparameters
   const width = validateDimension(input.width, DEFAULT_HF_WIDTH, 'Width');
   const height = validateDimension(input.height, DEFAULT_HF_HEIGHT, 'Height');
+
+  const rawSteps = Number(input.steps);
+  const steps =
+    Number.isFinite(rawSteps) && rawSteps >= 1 && rawSteps <= 50
+      ? model === 'black-forest-labs/FLUX.1-schnell'
+        ? Math.min(8, Math.max(1, Math.round(rawSteps <= 8 ? rawSteps : 4)))
+        : Math.round(rawSteps)
+      : undefined;
+
+  const rawCfg = Number(input.guidanceScale);
+  const guidanceScale =
+    Number.isFinite(rawCfg) && rawCfg >= 1 && rawCfg <= 20
+      ? Number(rawCfg.toFixed(1))
+      : undefined;
 
   // 5. Verify server-side HF_TOKEN (unless test hook provided)
   const token = process.env.HF_TOKEN?.trim();
@@ -393,6 +402,12 @@ export async function generateHuggingFaceImage(
           const parameters: Record<string, unknown> = { width, height };
           if (negativePrompt) {
             parameters.negative_prompt = negativePrompt;
+          }
+          if (steps !== undefined) {
+            parameters.num_inference_steps = steps;
+          }
+          if (guidanceScale !== undefined && model !== 'black-forest-labs/FLUX.1-schnell') {
+            parameters.guidance_scale = guidanceScale;
           }
           return client.textToImage(
             {
@@ -460,10 +475,15 @@ interface HfHealthStatus {
 let cachedHfHealth: { expiresAt: number; status: HfHealthStatus } | null = null;
 let hfQuotaExhaustedUntil = 0;
 
-export async function checkHfHealth(): Promise<HfHealthStatus> {
+export async function checkHfHealth(forceRefresh = false): Promise<HfHealthStatus> {
   const configured = isHfTokenConfigured();
   if (!configured) {
     return { configured: false, ok: false };
+  }
+
+  if (forceRefresh) {
+    hfQuotaExhaustedUntil = 0;
+    cachedHfHealth = null;
   }
 
   const now = Date.now();

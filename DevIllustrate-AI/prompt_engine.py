@@ -81,8 +81,9 @@ def enhance_prompt_gemini(user_prompt: str, style: str = "Professional 3D") -> D
     )
 
     client = genai.Client(api_key=api_key)
+    model_id = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip() or "gemini-3.1-flash-lite"
     response = client.models.generate_content(
-        model="gemini-4-hydrogen",
+        model=model_id,
         contents=f'User concept: "{cleaned}"\nSelected visual style: "{style}"',
         config=types.GenerateContentConfig(
             system_instruction=system_instruction,
